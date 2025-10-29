@@ -2,9 +2,10 @@
 # -*- coding: utf-8 -*-
 """
 KōreroNET Dashboard
-- Tab 1: root CSV heatmaps (Drive or local) — button now "Show results".
+- Tab 1: root CSV heatmaps (Drive or local) — button now "Show results" with a unique key.
 - Tab 2: verify via snapshot-date calendar + master CSVs + on-demand chunk fetch.
-- Tab 3: Power graph from 'From the node/Power logs' (Drive). Reads latest 7 logs, stitches hourly arrays.
+- Tab 3: Power graph from 'From the node/Power logs' (Drive). Reads latest N logs, stitches hourly arrays.
+  • Always shows SoC_i (%) and Wh on dual axes. No extra checkboxes.
 """
 
 import os, io, re, glob, json
@@ -125,7 +126,6 @@ def ensure_chunk_cached(chunk_name: str, folder_id: str, subdir: str) -> Optiona
     local_path = CHUNK_CACHE / subdir / chunk_name
     if local_path.exists():
         return local_path
-    # Fetch file by name
     for k in list_children(folder_id, max_items=2000):
         if k.get("name") == chunk_name:
             try:
@@ -136,7 +136,6 @@ def ensure_chunk_cached(chunk_name: str, folder_id: str, subdir: str) -> Optiona
     return None
 
 def find_subfolder_by_name(root_id: str, name_ci: str) -> Optional[Dict[str, Any]]:
-    """Case-insensitive single-level search."""
     kids = list_children(root_id, max_items=2000)
     for k in kids:
         if k.get("mimeType")=="application/vnd.google-apps.folder" and k.get("name","").lower()==name_ci.lower():
@@ -466,7 +465,7 @@ with tab1:
                 pass
         return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
-    if st.button("Show results", type="primary"):
+    if st.button("Show results", type="primary", key="tab1_show_btn"):
         with st.spinner("Rendering heatmap…"):
             if src == "BirdNET (bn)":
                 make_heatmap(load_and_filter(bn_by_date.get(d, []), "bn", d), min_conf, f"BirdNET • {d.isoformat()}")
@@ -590,7 +589,6 @@ with tab3:
     def list_power_logs(folder_id: str) -> List[Dict[str, Any]]:
         kids = list_children(folder_id, max_items=2000)
         files = [k for k in kids if k.get("mimeType") != "application/vnd.google-apps.folder" and LOG_RE.match(k.get("name",""))]
-        # Sort newest first by name timestamp
         files.sort(key=lambda m: m.get("name",""), reverse=True)
         return files
 
@@ -602,14 +600,13 @@ with tab3:
         return local_path
 
     def _parse_float_list(line: str) -> List[float]:
-        # after the prefix "PH_XXX," split commas, strip trailing punctuation
         try:
             payload = line.split(",", 1)[1]
         except Exception:
             return []
         vals = []
         for tok in payload.strip().split(","):
-            tok = tok.strip().rstrip(".")  # some lines might end with a dot
+            tok = tok.strip().rstrip(".")
             try:
                 vals.append(float(tok))
             except Exception:
@@ -628,7 +625,6 @@ with tab3:
         try:
             head_dt = datetime.strptime(lines[0], "%Y-%m-%d %H:%M:%S")
         except Exception:
-            # Try to find a datetime somewhere in line 1–2
             head_dt = None
             for l in lines[:3]:
                 m = re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", l)
@@ -655,7 +651,6 @@ with tab3:
         L = max(len(WH), len(mAh), len(SoCi), len(SoCv))
         if L == 0: return None
 
-        # If any list shorter, pad with NaN on the left
         def _pad_left(arr: List[float], n: int) -> List[float]:
             return [np.nan]*(n-len(arr)) + arr if len(arr) < n else arr[:n]
 
@@ -683,21 +678,18 @@ with tab3:
         if not frames:
             return pd.DataFrame(columns=["t","PH_WH","PH_mAh","PH_SoCi","PH_SoCv"])
         merged = pd.concat(frames, ignore_index=True)
-        # Deduplicate on timestamp, keep the last (newer file assumed last in concat order if we processed chronologically)
         merged.sort_values("t", inplace=True)
         merged = merged.drop_duplicates(subset=["t"], keep="last")
         merged.reset_index(drop=True, inplace=True)
         return merged
 
-    cols = st.columns([2,1,1])
+    cols = st.columns([2,1])
     with cols[0]:
         lookback = st.number_input("How many latest logs to stitch", min_value=3, max_value=50, value=7, step=1)
     with cols[1]:
-        show_socv = st.checkbox("Show SoC_v", value=True)
-    with cols[2]:
-        show_mah  = st.checkbox("Show mAh", value=False)
+        pass  # no toggles requested
 
-    if st.button("Show results", type="primary"):
+    if st.button("Show results", type="primary", key="tab3_show_btn"):
         with st.spinner("Building power time-series…"):
             ts = build_power_timeseries(logs_folder["id"], latest_n=int(lookback))
 
@@ -705,30 +697,20 @@ with tab3:
             st.warning("No parsable power logs found.")
         else:
             fig = go.Figure()
-            # SoC_i (%)
+            # SoC_i (%) on y1
             fig.add_trace(go.Scatter(
                 x=ts["t"], y=ts["PH_SoCi"], mode="lines", name="SoC_i (%)", yaxis="y1"
             ))
-            # Optional SoC_v (%)
-            if show_socv:
-                fig.add_trace(go.Scatter(
-                    x=ts["t"], y=ts["PH_SoCv"], mode="lines", name="SoC_v (%)", yaxis="y1", line=dict(dash="dash")
-                ))
-            # Wh (2nd axis)
+            # Wh on y2
             fig.add_trace(go.Scatter(
                 x=ts["t"], y=ts["PH_WH"], mode="lines", name="Energy (Wh)", yaxis="y2"
             ))
-            # Optional mAh (2nd axis)
-            if show_mah:
-                fig.add_trace(go.Scatter(
-                    x=ts["t"], y=ts["PH_mAh"], mode="lines", name="Charge (mAh)", yaxis="y2", line=dict(dash="dot")
-                ))
 
             fig.update_layout(
                 title="Power / State of Charge over time",
                 xaxis=dict(title="Time"),
                 yaxis=dict(title="SoC (%)", rangemode="tozero"),
-                yaxis2=dict(title="Wh / mAh", overlaying="y", side="right"),
+                yaxis2=dict(title="Wh", overlaying="y", side="right"),
                 legend=dict(orientation="h"),
                 margin=dict(l=10, r=10, t=50, b=10),
             )
@@ -736,7 +718,6 @@ with tab3:
 
             # Quick last-point indicators
             last = ts.iloc[-1]
-            c1, c2, c3 = st.columns(3)
+            c1, c2 = st.columns(2)
             with c1: st.metric("Last SoC_i (%)", f"{last['PH_SoCi']:.1f}")
-            with c2: st.metric("Last SoC_v (%)", f"{last['PH_SoCv']:.1f}")
-            with c3: st.metric("Last Energy (Wh)", f"{last['PH_WH']:.2f}")
+            with c2: st.metric("Last Energy (Wh)", f"{last['PH_WH']:.2f}")
