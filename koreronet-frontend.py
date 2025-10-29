@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-KōreroNET Dashboard — Google Drive backed, with visible progress + throttling
+KōreroNET Dashboard — Drive-backed (simplified)
+- Tab 1: Heatmaps from bn*/kn* CSVs at Drive root (same logic you had).
+- Tab 2: Verify with a proper calendar; dates come from *inside each CSV* (ActualTime),
+         scanning all Backup/<snapshot>/{koreronet,birdnet}. No snapshot/slider clutter.
+- Tab 3: Quick Drive browser.
 
-- Uses st.secrets: GDRIVE_FOLDER_ID and [service_account] (or SERVICE_ACCOUNT_JSON).
-- Tab 1: heatmaps from bn*/kn* CSVs at the root of Folder ID (downloads on demand).
-- Tab 2: verify snapshots under Backup/YYYYMMDD_HHMMSS/{koreronet,birdnet} (progress shown).
-- Tab 3: Drive browser and cache controls.
+Requires Streamlit secrets:
+GDRIVE_FOLDER_ID = "..."
+[service_account]  (or SERVICE_ACCOUNT_JSON)
 """
-
-import os, io, glob, re, json, shutil
+import os, io, re, glob, json, shutil
 from pathlib import Path
 from datetime import date, datetime, timedelta
 from typing import Dict, Any, List, Optional, Tuple
@@ -19,25 +21,24 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-# ---------- UI ----------
+# ---------------- UI & global cache dirs ----------------
 st.set_page_config(page_title="KōreroNET Dashboard", layout="wide")
 st.markdown("""
 <style>
 .block-container {padding-top:1rem; padding-bottom:1rem;}
-.stTabs [role="tablist"] {gap: .5rem;}
-.stTabs [role="tab"] {padding: .6rem 1rem; border-radius: 999px; border: 1px solid #3a3a3a;}
+.stTabs [role="tablist"] {gap:.5rem;}
+.stTabs [role="tab"] {padding:.6rem 1rem; border-radius:999px; border:1px solid #3a3a3a;}
 </style>
 """, unsafe_allow_html=True)
 st.title("KōreroNET • Daily Dashboard")
 
-# ---------- Local caches ----------
-CACHE_ROOT = Path("/tmp/koreronet_cache")
-CSV_CACHE = CACHE_ROOT / "csv"
-CHUNK_CACHE = CACHE_ROOT / "chunks"
+CACHE_ROOT   = Path("/tmp/koreronet_cache")
+CSV_CACHE    = CACHE_ROOT / "csv"
+CHUNK_CACHE  = CACHE_ROOT / "chunks"
 for p in (CSV_CACHE, CHUNK_CACHE):
     p.mkdir(parents=True, exist_ok=True)
 
-# ---------- Drive client ----------
+# --------------- Drive Client ---------------
 def _normalize_private_key(pk: str) -> str:
     if not isinstance(pk, str): return pk
     if "\\n" in pk: pk = pk.replace("\\n", "\n")
@@ -52,9 +53,10 @@ def build_drive():
     try:
         from google.oauth2 import service_account
         from googleapiclient.discovery import build
-        sa_tbl = st.secrets.get("service_account")
+        sa_tbl  = st.secrets.get("service_account")
         sa_json = st.secrets.get("SERVICE_ACCOUNT_JSON")
         if not sa_tbl and not sa_json:
+            st.error("Missing service account secrets.")
             return None
         info = dict(sa_tbl) if sa_tbl else json.loads(sa_json)
         if "private_key" in info:
@@ -71,7 +73,7 @@ GDRIVE_FOLDER_ID = st.secrets.get("GDRIVE_FOLDER_ID")
 drive = build_drive() if GDRIVE_FOLDER_ID else None
 DRIVE_ENABLED = bool(drive and GDRIVE_FOLDER_ID)
 
-# ---------- Drive helpers ----------
+# --------------- Drive Helpers ---------------
 def list_children(folder_id: str, max_items: int = 2000) -> List[Dict[str, Any]]:
     items, token = [], None
     while True:
@@ -79,7 +81,7 @@ def list_children(folder_id: str, max_items: int = 2000) -> List[Dict[str, Any]]
         if page_size <= 0: break
         resp = drive.files().list(
             q=f"'{folder_id}' in parents and trashed=false",
-            fields="nextPageToken, files(id,name,mimeType,modifiedTime,size,md5Checksum)",
+            fields="nextPageToken, files(id,name,mimeType,modifiedTime,size,md5Checksum,parents)",
             pageSize=page_size,
             pageToken=token,
             orderBy="folder,name_natural",
@@ -109,18 +111,17 @@ def download_to(path: Path, file_id: str) -> Path:
             _, done = downloader.next_chunk()
     return path
 
-def ensure_csv_cached_by_meta(meta: Dict[str, Any], subdir: str = "") -> Path:
-    name = meta["name"]
-    target_dir = CSV_CACHE / subdir if subdir else CSV_CACHE
-    local_path = target_dir / name
+def ensure_csv_cached(meta: Dict[str, Any], subdir: str) -> Path:
+    local_path = (CSV_CACHE / subdir / meta["name"])
     if not local_path.exists():
         download_to(local_path, meta["id"])
     return local_path
 
 def ensure_chunk_cached(chunk_name: str, folder_id: str, subdir: str) -> Optional[Path]:
-    local_path = (CHUNK_CACHE / subdir / chunk_name)
+    local_path = CHUNK_CACHE / subdir / chunk_name
     if local_path.exists():
         return local_path
+    # search the folder for this file name
     for k in list_children(folder_id, max_items=2000):
         if k.get("name") == chunk_name:
             try:
@@ -130,21 +131,10 @@ def ensure_chunk_cached(chunk_name: str, folder_id: str, subdir: str) -> Optiona
                 return None
     return None
 
-# ---------- Local fallback roots ----------
-DEFAULT_ROOT = r"G:\My Drive\From the node"
-BACKUP_ROOT_DEFAULT = r"G:\My Drive\From the node\Backup"
-ROOT_LOCAL = os.getenv("KORERONET_DATA_ROOT", DEFAULT_ROOT)
-BACKUP_ROOT_LOCAL = os.getenv("KORERONET_BACKUP_ROOT", BACKUP_ROOT_DEFAULT)
-
-# ---------- CSV discovery ----------
-@st.cache_data(show_spinner=False)
-def list_csvs_drive(folder_id: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    kids = list_children(folder_id, max_items=2000)
-    bn = [k for k in kids if k.get("name","").lower().startswith("bn") and k.get("name","").lower().endswith(".csv")]
-    kn = [k for k in kids if k.get("name","").lower().startswith("kn") and k.get("name","").lower().endswith(".csv")]
-    bn.sort(key=lambda m: m.get("name",""))
-    kn.sort(key=lambda m: m.get("name",""))
-    return bn, kn
+# --------------- Local fallback (Tab 1 only) ---------------
+DEFAULT_ROOT          = r"G:\My Drive\From the node"
+BACKUP_ROOT_DEFAULT   = r"G:\My Drive\From the node\Backup"
+ROOT_LOCAL            = os.getenv("KORERONET_DATA_ROOT", DEFAULT_ROOT)
 
 @st.cache_data(show_spinner=False)
 def list_csvs_local(root: str) -> Tuple[List[str], List[str]]:
@@ -152,20 +142,15 @@ def list_csvs_local(root: str) -> Tuple[List[str], List[str]]:
     kn_paths = sorted(glob.glob(os.path.join(root, "kn*.csv")))
     return bn_paths, kn_paths
 
-def _download_and_return_paths(metas: List[Dict[str, Any]], label: str, subdir: str = "") -> List[Path]:
-    out = []
-    prog = st.progress(0.0)
-    stat = st.empty()
-    n = max(1, len(metas))
-    for i, m in enumerate(metas, 1):
-        stat.text(f"Downloading {label} {i}/{n}: {m.get('name')}")
-        out.append(ensure_csv_cached_by_meta(m, subdir=subdir))
-        prog.progress(i/n)
-    stat.text("Done.")
-    prog.progress(1.0)
-    return out
+# --------------- Root CSVs (Tab 1) ---------------
+@st.cache_data(show_spinner=False)
+def list_csvs_drive_root(folder_id: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    kids = list_children(folder_id, max_items=2000)
+    bn = [k for k in kids if k.get("name","").lower().startswith("bn") and k.get("name","").lower().endswith(".csv")]
+    kn = [k for k in kids if k.get("name","").lower().startswith("kn") and k.get("name","").lower().endswith(".csv")]
+    bn.sort(key=lambda m: m.get("name","")); kn.sort(key=lambda m: m.get("name",""))
+    return bn, kn
 
-# ---------- Date indexing ----------
 @st.cache_data(show_spinner=False)
 def extract_dates_from_csv(path: str | Path) -> List[date]:
     path = str(path)
@@ -192,7 +177,7 @@ def build_date_index(paths: List[Path]) -> Dict[date, List[str]]:
             idx.setdefault(d, []).append(str(p))
     return idx
 
-# ---------- Normalize + heatmap ----------
+# --------------- Standardize + Heatmap ---------------
 def standardize_df(df: pd.DataFrame, kind: str) -> pd.DataFrame:
     df = df.copy()
     df["Confidence"] = pd.to_numeric(df.get("Confidence", np.nan), errors="coerce")
@@ -216,17 +201,15 @@ def make_heatmap(df: pd.DataFrame, min_conf: float, title: str):
         st.warning("No detections after applying the confidence filter.")
         return
     df_f["Hour"] = df_f["ActualTime"].dt.hour
-    hour_labels_map = {h: f"{(h % 12) or 12} {'AM' if h < 12 else 'PM'}" for h in range(24)}
-    hour_order = [hour_labels_map[h] for h in range(24)]
-    df_f["HourLabel"] = df_f["Hour"].map(hour_labels_map)
-    pivot = (df_f.groupby(["Label", "HourLabel"]).size().unstack(fill_value=0).astype(int))
-    for lbl in hour_order:
+    hour_labels = {h: f"{(h % 12) or 12} {'AM' if h < 12 else 'PM'}" for h in range(24)}
+    order = [hour_labels[h] for h in range(24)]
+    df_f["HourLabel"] = df_f["Hour"].map(hour_labels)
+    pivot = df_f.groupby(["Label","HourLabel"]).size().unstack(fill_value=0).astype(int)
+    for lbl in order:
         if lbl not in pivot.columns: pivot[lbl] = 0
-    pivot = pivot[hour_order]
+    pivot = pivot[order]
     totals = pivot.sum(axis=1)
     pivot = pivot.loc[totals.sort_values(ascending=False).index]
-    if pivot.empty:
-        st.warning("No data to plot."); return
     fig = px.imshow(
         pivot.values, x=pivot.columns, y=pivot.index,
         color_continuous_scale="RdYlBu_r",
@@ -241,72 +224,115 @@ def make_heatmap(df: pd.DataFrame, min_conf: float, title: str):
 def load_csv(path: str | Path) -> pd.DataFrame:
     return pd.read_csv(str(path))
 
-# ---------- Snapshots ----------
+# --------------- Snapshot discovery (Drive) ---------------
 SNAP_RE = re.compile(r"^(\d{8})_(\d{6})$")
-def _parse_snapshot(name: str) -> Optional[datetime]:
-    m = SNAP_RE.match(name)
-    return datetime.strptime(m.group(1)+m.group(2), "%Y%m%d%H%M%S") if m else None
 
 @st.cache_data(show_spinner=False)
-def list_snapshots_local(backup_root: str) -> List[Tuple[datetime, str, str]]:
-    if not os.path.isdir(backup_root): return []
-    items = []
-    for n in os.listdir(backup_root):
-        p = os.path.join(backup_root, n)
-        if os.path.isdir(p):
-            dt = _parse_snapshot(n)
-            if dt: items.append((dt, n, p))
-    items.sort(key=lambda x: x[0], reverse=True)
-    return items
-
-@st.cache_data(show_spinner=False)
-def list_snapshots_drive(root_folder_id: str) -> List[Tuple[datetime, str, str]]:
+def list_snapshots_drive(root_folder_id: str) -> List[Dict[str, Any]]:
     backup = find_child_folder_by_name(root_folder_id, "Backup")
     if not backup: return []
-    kids = [k for k in list_children(backup["id"], max_items=2000)
-            if k.get("mimeType") == "application/vnd.google-apps.folder" and SNAP_RE.match(k.get("name",""))]
-    out = []
-    for k in kids:
-        dt = _parse_snapshot(k["name"])
-        if dt: out.append((dt, k["name"], k["id"]))
-    out.sort(key=lambda x: x[0], reverse=True)
+    kids = list_children(backup["id"], max_items=2000)
+    snaps = [k for k in kids if k.get("mimeType")=="application/vnd.google-apps.folder" and SNAP_RE.match(k.get("name",""))]
+    snaps.sort(key=lambda m: m.get("name",""), reverse=True)
+    return snaps  # each has id, name
+
+def _list_source_csvs_drive(snapshot_id: str, source_folder_name: str) -> Tuple[str, List[Dict[str,Any]]]:
+    """Returns (chunk_folder_id, csv_meta_list) for koreronet or birdnet under a snapshot."""
+    kids = list_children(snapshot_id, max_items=2000)
+    sub = [k for k in kids if k.get("mimeType")=="application/vnd.google-apps.folder" and k.get("name")==source_folder_name]
+    if not sub: return "", []
+    src_id = sub[0]["id"]
+    files = [f for f in list_children(src_id, max_items=2000) if f.get("name","").lower().endswith(".csv")]
+    files.sort(key=lambda m: m.get("name",""))
+    return src_id, files
+
+# --------------- Robust CSV parsers for Verify ---------------
+def _find_col(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
+    low = {c.lower().strip().replace(" ","").replace("_",""): c for c in df.columns}
+    for cand in candidates:
+        key = cand.lower().strip().replace(" ","").replace("_","")
+        if key in low: return low[key]
+    return None
+
+def _std_from_detection_csv(df: pd.DataFrame, kind: str, chunk_folder_id: str) -> pd.DataFrame:
+    """Return standardized rows. Prefer ActualTime from inside the CSV."""
+    df = df.copy()
+    # Label column
+    label_col = _find_col(df, ["Label","Common name","common_name","species","class"])
+    if not label_col:
+        df["Label"] = "Unknown"
+    else:
+        df["Label"] = df[label_col].astype(str)
+
+    # Confidence column
+    conf_col = _find_col(df, ["Confidence","prob","score"])
+    df["Confidence"] = pd.to_numeric(df[conf_col], errors="coerce") if conf_col else np.nan
+
+    # Chunk filename
+    file_col = _find_col(df, ["file","chunk_file","chunk","wav","chunkname"])
+    df["ChunkName"] = df[file_col].astype(str) if file_col else ""
+
+    # SRC + offsets (for fallback time calc)
+    src_col   = _find_col(df, ["src","source","orig","origin","file_src"])
+    start_col = _find_col(df, ["det_start","start_s","start","offset_s","offset"])
+    df["_src"]  = df[src_col] if src_col else ""
+    df["_off"]  = pd.to_numeric(df[start_col], errors="coerce") if start_col else np.nan
+
+    # PRIMARY: ActualTime from inside CSV
+    at_col = _find_col(df, ["ActualTime","Actual Time","actualtime"])
+    if at_col:
+        at = pd.to_datetime(df[at_col], errors="coerce", dayfirst=True)
+    else:
+        # FALLBACK: derive from src filename + offset
+        def _from_src(s: Any, off: Any):
+            m = re.match(r"^(\d{8})_(\d{6})", os.path.basename(str(s)))
+            if not m: return pd.NaT
+            base = datetime.strptime(m.group(1)+m.group(2), "%Y%m%d%H%M%S")
+            try: return base + timedelta(seconds=float(off or 0.0))
+            except Exception: return pd.NaT
+        at = pd.to_datetime([_from_src(s,o) for s,o in zip(df["_src"], df["_off"])])
+
+    out = pd.DataFrame({
+        "Label": df["Label"],
+        "Confidence": df["Confidence"],
+        "ActualTime": at,
+        "Kind": kind.upper(),
+        "ChunkName": df["ChunkName"],
+        "ChunkDriveFolderId": chunk_folder_id,
+    })
+    out = out.dropna(subset=["ActualTime"])
     return out
 
-def list_snapshots_any() -> Tuple[List[Tuple[datetime, str, str]], str]:
-    if DRIVE_ENABLED:
-        return list_snapshots_drive(GDRIVE_FOLDER_ID), "drive"
-    else:
-        return list_snapshots_local(BACKUP_ROOT_LOCAL), "local"
-
-# ---------- App Tabs ----------
+# --------------- UI Tabs ---------------
 tab1, tab_verify, tab3 = st.tabs(["📊 Detections", "🎧 Verify recordings", "📁 Drive"])
 
-# ===== TAB 1 =====
+# ===== TAB 1: same logic, Drive-backed root CSVs =====
 with tab1:
-    st.caption("Uses CSVs at the **root** of your Google Drive Folder ID (bn*.csv / kn*.csv).")
-    max_root_csv = st.slider("Max CSVs per source (root)", 10, 1000, 200, 10)
+    st.caption("Root of Drive folder: uses bn*.csv / kn*.csv (dates parsed from ActualTime in those files).")
     if DRIVE_ENABLED:
         with st.status("Listing root CSVs…", expanded=False) as s:
-            bn_meta, kn_meta = list_csvs_drive(GDRIVE_FOLDER_ID)
-            s.update(label=f"Found BN={len(bn_meta)}, KN={len(kn_meta)}")
+            bn_meta, kn_meta = list_csvs_drive_root(GDRIVE_FOLDER_ID)
+            s.update(label=f"Found BN={len(bn_meta)} KN={len(kn_meta)} at root")
+
         if not bn_meta and not kn_meta:
-            st.error("No bn_*.csv / kn_*.csv at root of the Drive folder."); st.stop()
-        bn_meta = bn_meta[:max_root_csv]
-        kn_meta = kn_meta[:max_root_csv]
-        st.write(f"Indexing up to BN={len(bn_meta)}, KN={len(kn_meta)}")
-        st.subheader("Indexing dates")
-        with st.expander("Download progress (root CSVs)", expanded=True):
-            bn_paths = _download_and_return_paths(bn_meta, "BN", subdir="root/bn") if bn_meta else []
-            kn_paths = _download_and_return_paths(kn_meta, "KN", subdir="root/kn") if kn_meta else []
-        with st.status("Building date index…", expanded=False):
-            bn_by_date = build_date_index(bn_paths)
-            kn_by_date = build_date_index(kn_paths)
+            # fallback to local (handy for offline)
+            bn_local, kn_local = list_csvs_local(ROOT_LOCAL)
+            if not bn_local and not kn_local:
+                st.error("No bn*/kn* CSVs at Drive root (or local fallback)."); st.stop()
+            bn_paths = [Path(p) for p in bn_local]
+            kn_paths = [Path(p) for p in kn_local]
+        else:
+            with st.expander("Download progress (root)", expanded=True):
+                bn_paths = [ensure_csv_cached(m, subdir="root/bn") for m in bn_meta]
+                kn_paths = [ensure_csv_cached(m, subdir="root/kn") for m in kn_meta]
     else:
-        bn_paths_local, kn_paths_local = list_csvs_local(ROOT_LOCAL)
-        if not bn_paths_local and not kn_paths_local:
-            st.error("No bn_*.csv / kn_*.csv found on local fallback."); st.stop()
-        bn_paths = [Path(p) for p in bn_paths_local][:max_root_csv]
-        kn_paths = [Path(p) for p in kn_paths_local][:max_root_csv]
+        bn_local, kn_local = list_csvs_local(ROOT_LOCAL)
+        if not bn_local and not kn_local:
+            st.error("Drive not configured and no local fallback found."); st.stop()
+        bn_paths = [Path(p) for p in bn_local]
+        kn_paths = [Path(p) for p in kn_local]
+
+    with st.status("Building date index…", expanded=False):
         bn_by_date = build_date_index(bn_paths)
         kn_by_date = build_date_index(kn_paths)
 
@@ -320,9 +346,9 @@ with tab1:
     if src == "Combined":
         options, help_txt = paired_dates, "Only dates that have BOTH BN & KN detections."
     elif src == "BirdNET (bn)":
-        options, help_txt = bn_dates, "Dates that appear inside any BN file."
+        options, help_txt = bn_dates, "Dates present in any BN file."
     else:
-        options, help_txt = kn_dates, "Dates that appear inside any KN file."
+        options, help_txt = kn_dates, "Dates present in any KN file."
 
     if not options:
         st.warning(f"No available dates for {src}."); st.stop()
@@ -331,7 +357,7 @@ with tab1:
     d = st.date_input("Day", value=d_default, min_value=options[0], max_value=options[-1], help=help_txt)
     if d not in options:
         earlier = [x for x in options if x <= d]
-        d = (earlier[-1] if earlier else options[0])
+        d = earlier[-1] if earlier else options[0]
         st.info(f"No data for the chosen date; showing {d.isoformat()}.")
 
     def load_and_filter(paths: List[Path], kind: str, day_selected: date):
@@ -350,228 +376,123 @@ with tab1:
     with st.form(key="det_form"):
         if st.form_submit_button("Update"):
             if src == "BirdNET (bn)":
-                df_bn = load_and_filter([Path(p) for p in bn_by_date.get(d, [])], "bn", d)
-                make_heatmap(df_bn, min_conf, f"BirdNET • {d.isoformat()}")
+                make_heatmap(load_and_filter(bn_by_date.get(d, []), "bn", d), min_conf, f"BirdNET • {d.isoformat()}")
             elif src == "KōreroNET (kn)":
-                df_kn = load_and_filter([Path(p) for p in kn_by_date.get(d, [])], "kn", d)
-                make_heatmap(df_kn, min_conf, f"KōreroNET • {d.isoformat()}")
+                make_heatmap(load_and_filter(kn_by_date.get(d, []), "kn", d), min_conf, f"KōreroNET • {d.isoformat()}")
             else:
-                df_bn = load_and_filter([Path(p) for p in bn_by_date.get(d, [])], "bn", d)
-                df_kn = load_and_filter([Path(p) for p in kn_by_date.get(d, [])], "kn", d)
+                df_bn = load_and_filter(bn_by_date.get(d, []), "bn", d)
+                df_kn = load_and_filter(kn_by_date.get(d, []), "kn", d)
                 make_heatmap(pd.concat([df_bn, df_kn], ignore_index=True), min_conf, f"Combined (BN+KN) • {d.isoformat()}")
 
-# ===== TAB 2 =====
+# ===== TAB 2: Verify — calendar + ActualTime *from CSVs inside Backup* =====
 with tab_verify:
-    st.subheader("Verify recordings (snapshots in Backup/…)")
-    list_only = st.checkbox("List only (no download)", value=False)
-    max_csv_per_src = st.slider("Max CSVs per source (snapshot)", 10, 2000, 300, 10)
-    colc1, colc2 = st.columns(2)
-    with colc1:
-        if st.button("Clear CSV cache"):
-            shutil.rmtree(CSV_CACHE, ignore_errors=True)
-            CSV_CACHE.mkdir(parents=True, exist_ok=True)
-            st.success("CSV cache cleared.")
-    with colc2:
-        if st.button("Clear audio cache"):
-            shutil.rmtree(CHUNK_CACHE, ignore_errors=True)
-            CHUNK_CACHE.mkdir(parents=True, exist_ok=True)
-            st.success("Audio cache cleared.")
+    st.caption("Scans **Backup/<snapshot>/{koreronet,birdnet}** on Drive. Dates are read from **inside each CSV**.")
 
-    snaps, s_mode = list_snapshots_any()
-    if not snaps:
-        st.warning("No snapshot folders like YYYYMMDD_HHMMSS found under Backup/."); st.stop()
+    if not DRIVE_ENABLED:
+        st.error("Drive not configured in secrets."); st.stop()
 
-    snap_name = st.selectbox("Snapshot", options=[n for _, n, _ in snaps], index=0, key="verify_snap")
-    snap_third = next(t for _, n, t in snaps if n == snap_name)  # drive folder ID or local path
+    # Minimal controls
+    colA, colB = st.columns([2,1])
+    with colA:
+        src_mode_v = st.selectbox("Source", ["KōreroNET (KN)", "BirdNET (BN)", "Combined"], index=0)
+    with colB:
+        min_conf_v = st.slider("Min confidence", 0.0, 1.0, 0.90, 0.01)
 
-    src_mode_v = st.selectbox("Source", ["KōreroNET (KN)", "BirdNET (BN)", "Combined"], index=0, key="verify_src")
-    min_conf_v = st.slider("Minimum confidence", 0.0, 1.0, 0.90, 0.01, key="verify_conf")
+    # Calendar (not constrained; we’ll report if no detections)
+    day_pick = st.date_input("Day to verify", value=date.today())
 
-    ctx = {"snap": snap_name, "src": src_mode_v, "conf": float(min_conf_v), "cap": max_csv_per_src, "list": list_only}
-    if st.session_state.get("v_ctx") != ctx:
-        st.session_state["v_ctx"] = ctx
-        st.session_state["v_loaded"] = False
-        st.session_state["v_df"] = pd.DataFrame()
+    # Load button
+    if st.button("Load day", type="primary"):
+        snaps = list_snapshots_drive(GDRIVE_FOLDER_ID)
+        if not snaps:
+            st.warning("No Backup snapshots found on Drive."); st.stop()
 
-    def _gather_csvs_local(snapshot_path: str, src_mode: str) -> List[Tuple[str, str]]:
-        todo = []
-        if src_mode in ("KōreroNET (KN)", "Combined"):
-            kn_dir = os.path.join(snapshot_path, "koreronet")
-            for p in sorted(glob.glob(os.path.join(kn_dir, "*.csv")))[:max_csv_per_src]:
-                todo.append(("kn", p))
-        if src_mode in ("BirdNET (BN)", "Combined"):
-            bn_dir = os.path.join(snapshot_path, "birdnet")
-            for p in sorted(glob.glob(os.path.join(bn_dir, "*.csv")))[:max_csv_per_src]:
-                todo.append(("bn", p))
-        return todo
+        # Prepare CSV lists across ALL snapshots for the chosen source(s)
+        src_sets: List[Tuple[str, List[Dict[str,Any]]]] = []
+        with st.status("Listing snapshot CSVs…", expanded=False) as sst:
+            if src_mode_v in ("KōreroNET (KN)", "Combined"):
+                all_kn: List[Dict[str,Any]] = []
+                kn_chunk_folder_ids: List[str] = []
+                for sn in snaps:
+                    kn_id, kn_files = _list_source_csvs_drive(sn["id"], "koreronet")
+                    if kn_id and kn_files:
+                        # bundle as tuples with parent folder id kept in meta
+                        for m in kn_files:
+                            m["_chunk_folder_id"] = kn_id
+                            m["_snap_id"] = sn["id"]
+                        all_kn.extend(kn_files)
+                src_sets.append(("kn", all_kn))
+            if src_mode_v in ("BirdNET (BN)", "Combined"):
+                all_bn: List[Dict[str,Any]] = []
+                for sn in snaps:
+                    bn_id, bn_files = _list_source_csvs_drive(sn["id"], "birdnet")
+                    if bn_id and bn_files:
+                        for m in bn_files:
+                            m["_chunk_folder_id"] = bn_id
+                            m["_snap_id"] = sn["id"]
+                        all_bn.extend(bn_files)
+                src_sets.append(("bn", all_bn))
+            total_files = sum(len(v) for _, v in src_sets)
+            sst.update(label=f"Found {total_files} CSVs across snapshots.")
 
-    def _gather_csvs_drive(snapshot_folder_id: str, src_mode: str) -> List[Tuple[str, Dict[str,Any], str]]:
-        kids = list_children(snapshot_folder_id, max_items=2000)
-        sub_kn = [k for k in kids if k.get("mimeType")=="application/vnd.google-apps.folder" and k.get("name")=="koreronet"]
-        sub_bn = [k for k in kids if k.get("mimeType")=="application/vnd.google-apps.folder" and k.get("name")=="birdnet"]
-        todo = []
-        if src_mode in ("KōreroNET (KN)", "Combined") and sub_kn:
-            kn_id = sub_kn[0]["id"]
-            kn_kids = [f for f in list_children(kn_id, max_items=2000) if f.get("name","").lower().endswith(".csv")]
-            kn_kids.sort(key=lambda m: m.get("name",""))
-            for m in kn_kids[:max_csv_per_src]:
-                todo.append(("kn", m, kn_id))
-        if src_mode in ("BirdNET (BN)", "Combined") and sub_bn:
-            bn_id = sub_bn[0]["id"]
-            bn_kids = [f for f in list_children(bn_id, max_items=2000) if f.get("name","").lower().endswith(".csv")]
-            bn_kids.sort(key=lambda m: m.get("name",""))
-            for m in bn_kids[:max_csv_per_src]:
-                todo.append(("bn", m, bn_id))
-        return todo
+        # Download + parse only what’s needed; filter by chosen day while reading
+        prog = st.progress(0.0)
+        status = st.empty()
+        frames: List[pd.DataFrame] = []
+        done, seen = 0, max(1, total_files)
 
-    def _load_with_progress_local(csv_list: List[Tuple[str, str]]) -> pd.DataFrame:
-        if list_only:
-            st.info(f"(List only) Local CSVs found: {len(csv_list)}"); return pd.DataFrame()
-        prog = st.progress(0.0); status = st.empty()
-        frames = []  # <<< FIXED
-        n = max(1, len(csv_list))
-        for i, (kind, path) in enumerate(csv_list, 1):
-            status.text(f"Parsing {i}/{n}: {os.path.basename(path)}")
-            try:
-                df = pd.read_csv(path, sep=None, engine="python")
-                cols = {c.lower().strip(): c for c in df.columns}
-                def col(name, default=np.nan):
-                    return df[cols[name]] if name in cols else pd.Series([default]*len(df))
-                out = pd.DataFrame({
-                    "chunk_file": col("file", ""),
-                    "label":      col("label", "Unknown").astype(str),
-                    "prob":       pd.to_numeric(col("prob"), errors="coerce"),
-                    "src":        col("src", ""),
-                    "start_s":    pd.to_numeric(col("start_s"), errors="coerce"),
-                    "end_s":      pd.to_numeric(col("end_s"), errors="coerce"),
-                    "det_start":  pd.to_numeric(col("det_start"), errors="coerce") if kind=="bn" else np.nan,
-                    "Kind":       kind.upper(),
-                })
-                out["ChunkPath"] = out["chunk_file"].apply(lambda f: os.path.join(os.path.dirname(path), f) if isinstance(f, str) else "")
-                out["ChunkName"] = out["chunk_file"].apply(lambda f: os.path.basename(f) if isinstance(f, str) else "")
-                out["ChunkDriveFolderId"] = ""
-                frames.append(out)
-            except Exception:
-                pass
-            prog.progress(i/n)
-        status.text("Processing…"); prog.progress(1.0)
-        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-
-    def _load_with_progress_drive(csv_list: List[Tuple[str, Dict[str,Any], str]], snap_id: str) -> pd.DataFrame:
-        if list_only:
-            st.info(f"(List only) Drive CSVs found: {len(csv_list)}"); return pd.DataFrame()
-        prog = st.progress(0.0); status = st.empty()
-        frames = []  # <<< FIXED
-        n = max(1, len(csv_list))
-        for i, (kind, meta, chunk_folder_id) in enumerate(csv_list, 1):
-            status.text(f"Downloading & parsing {i}/{n}: {meta.get('name')}")
-            try:
-                subdir = f"snap_{snap_id}/{ 'koreronet' if kind=='kn' else 'birdnet'}"
-                csv_path = ensure_csv_cached_by_meta(meta, subdir=subdir)
-                df = pd.read_csv(str(csv_path), sep=None, engine="python")
-                cols = {c.lower().strip(): c for c in df.columns}
-                def col(name, default=np.nan):
-                    return df[cols[name]] if name in cols else pd.Series([default]*len(df))
-                out = pd.DataFrame({
-                    "chunk_file": col("file", ""),
-                    "label":      col("label", "Unknown").astype(str),
-                    "prob":       pd.to_numeric(col("prob"), errors="coerce"),
-                    "src":        col("src", ""),
-                    "start_s":    pd.to_numeric(col("start_s"), errors="coerce"),
-                    "end_s":      pd.to_numeric(col("end_s"), errors="coerce"),
-                    "det_start":  pd.to_numeric(col("det_start"), errors="coerce") if kind=="bn" else np.nan,
-                    "Kind":       kind.upper(),
-                })
-                out["ChunkName"] = out["chunk_file"].apply(lambda f: os.path.basename(f) if isinstance(f, str) else "")
-                out["ChunkDriveFolderId"] = chunk_folder_id
-                out["ChunkPath"] = ""
-                frames.append(out)
-            except Exception:
-                pass
-            prog.progress(i/n)
-        status.text("Processing…"); prog.progress(1.0)
-        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-
-    # LOAD
-    if st.button("Load detections", type="primary"):
-        with st.status("Gathering CSV list…", expanded=True) as s:
-            if s_mode == "local":
-                csv_list_local = _gather_csvs_local(snap_third, src_mode_v)
-                s.update(label=f"Found {len(csv_list_local)} CSVs (local).")
-                raw = _load_with_progress_local(csv_list_local)
-            else:
-                csv_list_drive = _gather_csvs_drive(snap_third, src_mode_v)
-                s.update(label=f"Found {len(csv_list_drive)} CSVs (Drive).")
-                raw = _load_with_progress_drive(csv_list_drive, snap_third)
-        if list_only:
-            st.info("List-only mode: no detections loaded. Disable to parse files.")
-        else:
-            std_v = raw
-            def _actual_time(src_name: str, offset_seconds: float):
-                m = re.match(r"^(\d{8})_(\d{6})", os.path.basename(str(src_name)))
-                if not m: return pd.NaT
-                base = datetime.strptime(m.group(1)+m.group(2), "%Y%m%d%H%M%S")
+        for kind, metas in src_sets:
+            for m in metas:
+                done += 1
+                status.text(f"Parsing {done}/{total_files}: {m.get('name')}")
                 try:
-                    return base + timedelta(seconds=float(offset_seconds or 0.0))
+                    subdir = f"snap_{m['_snap_id']}/{'koreronet' if kind=='kn' else 'birdnet'}"
+                    csv_path = ensure_csv_cached(m, subdir=subdir)
+                    # Read quickly; we only need a few columns to filter by date
+                    df = pd.read_csv(str(csv_path), engine="python")
+                    std = _std_from_detection_csv(df, kind, m["_chunk_folder_id"])
+                    # Filter by date from inside CSV
+                    std = std[std["ActualTime"].dt.date == day_pick]
+                    if not std.empty:
+                        # Apply confidence filter now to avoid large memory
+                        std = std[pd.to_numeric(std["Confidence"], errors="coerce") >= float(min_conf_v)]
+                        if not std.empty:
+                            frames.append(std)
                 except Exception:
-                    return pd.NaT
-            if not std_v.empty:
-                use_off = std_v["det_start"].where(std_v["det_start"].notna(), std_v["start_s"])
-                times = [_actual_time(s, o) for s, o in zip(std_v["src"], use_off)]
-                std_v = pd.DataFrame({
-                    "Label": std_v["label"].astype(str),
-                    "Confidence": std_v["prob"].astype(float),
-                    "ActualTime": times,
-                    "Kind": std_v["Kind"],
-                    "ChunkPath": std_v.get("ChunkPath", pd.Series([""]*len(std_v))),
-                    "ChunkName": std_v.get("ChunkName", pd.Series([""]*len(std_v))),
-                    "ChunkDriveFolderId": std_v.get("ChunkDriveFolderId", pd.Series([""]*len(std_v))),
-                    "Start_s": std_v["start_s"],
-                    "End_s": std_v["end_s"],
-                }).dropna(subset=["ActualTime"]).sort_values("ActualTime").reset_index(drop=True)
-                std_v = std_v[std_v["Confidence"] >= float(min_conf_v)]
-            st.session_state["v_df"] = std_v
-            st.session_state["v_loaded"] = True
-            for k in list(st.session_state.keys()):
-                if isinstance(k, str) and k.startswith("v_idx::"):
-                    del st.session_state[k]
-            st.success("Detections loaded.")
+                    pass
+                prog.progress(done/seen)
 
-    if not st.session_state.get("v_loaded", False) or list_only:
-        st.info("Adjust settings and click **Load detections** (disable 'List only' to parse).")
-        st.stop()
+        status.text("Merging…")
+        prog.progress(1.0)
+        if not frames:
+            st.warning("No detections for that day from the CSV contents."); st.stop()
 
+        std_v = pd.concat(frames, ignore_index=True).sort_values("ActualTime").reset_index(drop=True)
+        st.session_state["v_df"] = std_v
+        st.session_state["v_loaded_at"] = f"{day_pick.isoformat()}::{src_mode_v}::{min_conf_v}"
+
+    # If not loaded yet, stop here
     std_v = st.session_state.get("v_df", pd.DataFrame())
     if std_v.empty:
-        st.warning("No detections after filtering."); st.stop()
+        st.info("Pick a date and click **Load day**."); st.stop()
 
-    # Calendar filter
+    # Playlist UI
+    day_loaded_key = st.session_state.get("v_loaded_at", "")
     avail_days = sorted(std_v["ActualTime"].dt.date.unique())
-    day_default = avail_days[-1]
-    day_pick = st.date_input("Day", value=day_default, min_value=avail_days[0], max_value=avail_days[-1],
-                             help="Filter the loaded detections by calendar day.")
-    if day_pick not in avail_days:
-        earlier = [x for x in avail_days if x <= day_pick]
-        day_pick = (earlier[-1] if earlier else avail_days[0])
-        st.info(f"No detections on that day; showing {day_pick.isoformat()} instead.")
-    std_day = std_v[std_v["ActualTime"].dt.date == day_pick]
-    if std_day.empty:
-        st.warning("No detections for the chosen day."); st.stop()
+    if len(avail_days) == 1 and avail_days[0] != day_pick:
+        st.info(f"(Loaded day is {avail_days[0].isoformat()} based on CSV content.)")
 
-    counts = std_day.groupby("Label").size().sort_values(ascending=False)
+    counts = std_v.groupby("Label").size().sort_values(ascending=False)
     species = st.selectbox(
         "Species",
         options=list(counts.index),
         format_func=lambda s: f"{s} — {counts[s]} detections",
         index=0,
-        key=f"verify_species::{day_pick.isoformat()}",
+        key=f"verify_species::{day_loaded_key}",
     )
 
-    playlist = std_day[std_day["Label"] == species].sort_values("ActualTime").reset_index(drop=True)
-    if playlist.empty:
-        st.info("No chunks for this species on the chosen day."); st.stop()
-
-    idx_key = f"v_idx::{snap_name}::{src_mode_v}::{day_pick.isoformat()}::{species}"
+    playlist = std_v[std_v["Label"] == species].sort_values("ActualTime").reset_index(drop=True)
+    idx_key = f"v_idx::{day_loaded_key}::{species}"
     if idx_key not in st.session_state: st.session_state[idx_key] = 0
     idx = st.session_state[idx_key] % len(playlist)
 
@@ -585,36 +506,26 @@ with tab_verify:
         if st.button("⏭ Next"): idx = (idx + 1) % len(playlist); autoplay = True
     st.session_state[idx_key] = idx
     with col4:
-        st.markdown(f"**{species}** — {len(playlist)} detections on **{day_pick.isoformat()}** | index {idx+1}/{len(playlist)}")
+        st.markdown(f"**{species}** — {len(playlist)} detections on **{avail_days[0].isoformat()}** | index {idx+1}/{len(playlist)}")
 
     row = playlist.iloc[idx]
-    meta = (f"**Confidence:** {row['Confidence']:.3f}  |  **Time:** {row['ActualTime']}  |  "
-            f"Segment: {float(row['Start_s']):.2f}–{float(row['End_s']):.2f}s")
-    st.markdown(meta)
+    st.markdown(f"**Confidence:** {float(row['Confidence']):.3f}  |  **Time:** {row['ActualTime']}")
 
+    # On-demand audio fetch (Drive)
     def _play_audio(row: pd.Series, auto: bool):
-        data = None
-        path_str = str(row.get("ChunkPath","") or "")
-        if path_str and os.path.isfile(path_str):
-            try:
-                with open(path_str, "rb") as f:
-                    data = f.read()
-            except Exception:
-                data = None
-        if (data is None) and DRIVE_ENABLED:
-            chunk_name = str(row.get("ChunkName","") or "")
-            folder_id = str(row.get("ChunkDriveFolderId","") or "")
-            if chunk_name and folder_id:
-                subdir = f"{snap_name}/{row.get('Kind','UNK')}"
-                cached = ensure_chunk_cached(chunk_name, folder_id, subdir=subdir)
-                if cached and cached.exists():
-                    try:
-                        with open(cached, "rb") as f:
-                            data = f.read()
-                    except Exception:
-                        data = None
-        if data is None:
-            st.warning("Cannot open audio chunk (not found or download failed)."); return
+        chunk_name = str(row.get("ChunkName","") or "")
+        folder_id  = str(row.get("ChunkDriveFolderId","") or "")
+        if not (chunk_name and folder_id):
+            st.warning("No chunk mapping in CSV."); return
+        subdir = f"{row.get('Kind','UNK')}"
+        cached = ensure_chunk_cached(chunk_name, folder_id, subdir=subdir)
+        if not cached or not cached.exists():
+            st.warning("Audio chunk not found in snapshot folder."); return
+        try:
+            with open(cached, "rb") as f:
+                data = f.read()
+        except Exception:
+            st.warning("Cannot open audio chunk."); return
         if auto:
             import base64
             b64 = base64.b64encode(data).decode()
@@ -624,18 +535,14 @@ with tab_verify:
 
     _play_audio(row, autoplay)
 
-# ===== TAB 3 =====
+# ===== TAB 3: Quick Drive view =====
 with tab3:
     if not DRIVE_ENABLED:
-        st.info("Drive not configured. Set GDRIVE_FOLDER_ID and service_account in Streamlit secrets.")
+        st.info("Drive not configured. Set GDRIVE_FOLDER_ID and service_account in secrets.")
     else:
-        st.caption("Top-level of your Google Drive Folder ID")
-        max_items = st.slider("Max items to show", 50, 1000, 300, 50)
+        st.caption("Top-level of Drive Folder ID")
         with st.spinner("Listing…"):
-            kids = list_children(GDRIVE_FOLDER_ID, max_items=max_items)
-        bn = [k for k in kids if k.get("name","").lower().startswith("bn") and k.get("name","").lower().endswith(".csv")]
-        kn = [k for k in kids if k.get("name","").lower().startswith("kn") and k.get("name","").lower().endswith(".csv")]
-        st.info(f"bn*.csv: {len(bn)} | kn*.csv: {len(kn)}")
+            kids = list_children(GDRIVE_FOLDER_ID, max_items=500)
         st.dataframe(
             [{"name": k.get("name"), "id": k.get("id"), "mimeType": k.get("mimeType"),
               "modifiedTime": k.get("modifiedTime"), "size": k.get("size")} for k in kids],
