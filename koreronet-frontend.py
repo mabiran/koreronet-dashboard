@@ -36,8 +36,6 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 
 # ─────────────────────────────────────────────────────────────
 # Page style
@@ -450,7 +448,7 @@ def build_master_index_by_snapshot_date(root_folder_id: str) -> pd.DataFrame:
 # ─────────────────────────────────────────────────────────────
 # Tabs
 # ─────────────────────────────────────────────────────────────
-tab1, tab_verify, tab3 = st.tabs(["📊 Detections", "🎧 Vocalisations", "⚡ Node Power"])
+tab1, tab_verify, tab3 = st.tabs(["📊 Detections", "🎧 Verify recordings", "⚡ Power"])
 
 # =========================
 # TAB 1 — Detections (root)
@@ -624,62 +622,39 @@ with tab_verify:
 # =====================
 with tab3:
     st.subheader("Node Power History")
+    if not drive_enabled():
+        st.error("Google Drive is not configured in secrets."); st.stop()
 
-    # If Google Drive client isn't available, fall back to local Power logs
-    USING_DRIVE = ("drive" in globals()) and (drive is not None)
-    if not USING_DRIVE:
-        st.warning("Google Drive client not initialized — using local 'Power logs' under ROOT.")
+    # Locate 'Power logs' under the Drive root
+    def find_subfolder_by_name(root_id: str, name_ci: str) -> Optional[Dict[str, Any]]:
+        kids = list_children(root_id, max_items=2000)
+        for k in kids:
+            if k.get("mimeType")=="application/vnd.google-apps.folder" and k.get("name","").lower()==name_ci.lower():
+                return k
+        return None
+
+    logs_folder = find_subfolder_by_name(GDRIVE_FOLDER_ID, "Power logs")
+    if not logs_folder:
+        st.warning("Could not find 'Power logs' folder under the Drive root.")
+        st.stop()
 
     LOG_RE = re.compile(r"^power_history_(\d{8})_(\d{6})\.log$", re.IGNORECASE)
 
-    # --- list logs (Drive or local) ---
-    def _list_power_logs_drive():
-        # Find "Power logs" folder under your Drive root
-        kids = list_children(GDRIVE_FOLDER_ID, max_items=2000)
-        logs_folder = next(
-            (k for k in kids if k.get("mimeType") == "application/vnd.google-apps.folder"
-             and k.get("name","").lower() == "power logs"),
-            None
-        )
-        if not logs_folder:
-            return []
-
-        files = list_children(logs_folder["id"], max_items=2000)
-        files = [k for k in files if k.get("mimeType") != "application/vnd.google-apps.folder"
-                 and LOG_RE.match(k.get("name",""))]
+    @st.cache_data(show_spinner=True)
+    def list_power_logs(folder_id: str) -> List[Dict[str, Any]]:
+        kids = list_children(folder_id, max_items=2000)
+        files = [k for k in kids if k.get("mimeType") != "application/vnd.google-apps.folder" and LOG_RE.match(k.get("name",""))]
         files.sort(key=lambda m: m.get("name",""), reverse=True)
-        return files, logs_folder["id"]
+        return files
 
-    def _list_power_logs_local():
-        power_dir = os.path.join(ROOT, "Power logs")
-        if not os.path.isdir(power_dir):
-            return [], power_dir
-        files = [f for f in os.listdir(power_dir) if LOG_RE.match(f)]
-        files.sort(reverse=True)
-        # normalize to same structure as Drive
-        metas = [{"name": fn, "id": os.path.join(power_dir, fn)} for fn in files]
-        return metas, power_dir
+    @st.cache_data(show_spinner=False)
+    def ensure_log_cached(meta: Dict[str, Any]) -> Path:
+        local_path = POWER_CACHE / meta["name"]
+        if not local_path.exists():
+            download_to(local_path, meta["id"])
+        return local_path
 
-    if USING_DRIVE:
-        log_metas, base_loc = _list_power_logs_drive()
-    else:
-        log_metas, base_loc = _list_power_logs_local()
-
-    # --- UI: default 3 latest logs ---
-    lookback = st.number_input("How many latest logs to stitch", min_value=1, max_value=50, value=3, step=1, key="tab3_lookback")
-
-    # --- read file (Drive or local) ---
-    def _ensure_log_local(meta):
-        """Returns a local path to the log file (downloads if on Drive)."""
-        if USING_DRIVE:
-            local_path = POWER_CACHE / meta["name"]  # POWER_CACHE exists from Drive setup; if not using Drive we won’t touch it
-            if not local_path.exists():
-                download_to(local_path, meta["id"])
-            return str(local_path)
-        else:
-            return meta["id"]  # already a local path
-
-    def _parse_float_list(line: str):
+    def _parse_float_list(line: str) -> List[float]:
         try:
             payload = line.split(",", 1)[1]
         except Exception:
@@ -690,23 +665,22 @@ with tab3:
             try:
                 vals.append(float(tok))
             except Exception:
-                vals.append(np.nan)
+                pass
         return vals
 
-    def _parse_power_log(path: str) -> pd.DataFrame | None:
+    def parse_power_log(path: Path) -> Optional[pd.DataFrame]:
         try:
-            text = open(path, "r", encoding="utf-8", errors="ignore").read()
+            text = path.read_text(encoding="utf-8", errors="ignore")
         except Exception:
             return None
         lines = [l.strip() for l in text.splitlines() if l.strip()]
-        if not lines:
-            return None
+        if not lines: return None
 
         # Header timestamp (first line)
-        head_dt = None
         try:
             head_dt = datetime.strptime(lines[0], "%Y-%m-%d %H:%M:%S")
         except Exception:
+            head_dt = None
             for l in lines[:3]:
                 m = re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", l)
                 if m:
@@ -719,66 +693,85 @@ with tab3:
             return None
 
         wh_line   = next((l for l in lines if l.upper().startswith("PH_WH")),   "")
+        mah_line  = next((l for l in lines if l.upper().startswith("PH_MAH")),  "")
         soci_line = next((l for l in lines if l.upper().startswith("PH_SOCI")), "")
+        socv_line = next((l for l in lines if l.upper().startswith("PH_SOCV")), "")
 
         WH   = _parse_float_list(wh_line)
+        mAh  = _parse_float_list(mah_line)
         SoCi = _parse_float_list(soci_line)
+        SoCv = _parse_float_list(socv_line)
 
-        L = max(len(WH), len(SoCi))
-        if L == 0:
-            return None
+        L = max(len(WH), len(mAh), len(SoCi), len(SoCv))
+        if L == 0: return None
 
-        def _pad(a, n):
-            a = list(a)
-            if len(a) < n:
-                a = [np.nan]*(n - len(a)) + a
-            return a[:n]
+        def _pad_left(arr: List[float], n: int) -> List[float]:
+            return [np.nan]*(n-len(arr)) + arr if len(arr) < n else arr[:n]
 
-        WH   = _pad(WH,   L)
-        SoCi = _pad(SoCi, L)
+        WH   = _pad_left(WH,   L)
+        mAh  = _pad_left(mAh,  L)
+        SoCi = _pad_left(SoCi, L)
+        SoCv = _pad_left(SoCv, L)
 
-        # Build time axis assuming hourly samples; last aligns to head_dt
-        times = [head_dt - timedelta(hours=(L - 1 - i)) for i in range(L)]
-
-        df = pd.DataFrame({
-            "t": pd.to_datetime(times),
-            "PH_WH": pd.to_numeric(WH, errors="coerce"),
-            "PH_SoCi": pd.to_numeric(SoCi, errors="coerce"),
-        })
+        # Build time axis: last element corresponds to head_dt
+        times = [head_dt - timedelta(hours=(L-1 - i)) for i in range(L)]
+        df = pd.DataFrame({"t": times, "PH_WH": WH, "PH_mAh": mAh, "PH_SoCi": SoCi, "PH_SoCv": SoCv})
         return df
 
-    if st.button("Show results", type="primary", key="tab3_show"):
-        if not log_metas:
-            st.warning("No power_history_*.log files found.")
-            st.stop()
-
-        # Build merged time-series from latest N logs
-        frames = []
-        for meta in log_metas[:int(lookback)]:
-            local = _ensure_log_local(meta)
-            df = _parse_power_log(local)
+    @st.cache_data(show_spinner=True)
+    def build_power_timeseries(folder_id: str, latest_n: int = 7) -> pd.DataFrame:
+        files = list_power_logs(folder_id)
+        if not files:
+            return pd.DataFrame(columns=["t","PH_WH","PH_mAh","PH_SoCi","PH_SoCv"])
+        frames: List[pd.DataFrame] = []
+        for meta in files[:max(1, latest_n)]:
+            local = ensure_log_cached(meta)
+            df = parse_power_log(local)
             if df is not None and not df.empty:
                 frames.append(df)
         if not frames:
+            return pd.DataFrame(columns=["t","PH_WH","PH_mAh","PH_SoCi","PH_SoCv"])
+        merged = pd.concat(frames, ignore_index=True)
+        merged.sort_values("t", inplace=True)
+        merged = merged.drop_duplicates(subset=["t"], keep="last")
+        merged.reset_index(drop=True, inplace=True)
+        return merged
+
+    cols = st.columns([2,1])
+    with cols[0]:
+        lookback = st.number_input("How many latest logs to stitch", min_value=3, max_value=50, value=7, step=1, key="tab3_lookback")
+    with cols[1]:
+        pass
+
+    if st.button("Show results", type="primary", key="tab3_show_btn"):
+        with st.spinner("Building power time-series…"):
+            ts = build_power_timeseries(logs_folder["id"], latest_n=int(lookback))
+
+        if ts.empty:
             st.warning("No parsable power logs found.")
-            st.stop()
+        else:
+            fig = go.Figure()
+            # SoC_i (%) on y1
+            fig.add_trace(go.Scatter(
+                x=ts["t"], y=ts["PH_SoCi"], mode="lines", name="SoC_i (%)", yaxis="y1"
+            ))
+            # Wh on y2
+            fig.add_trace(go.Scatter(
+                x=ts["t"], y=ts["PH_WH"], mode="lines", name="Energy (Wh)", yaxis="y2"
+            ))
 
-        ts = pd.concat(frames, ignore_index=True)
-        ts = ts.dropna(subset=["t"]).sort_values("t").drop_duplicates(subset=["t"], keep="last")
+            fig.update_layout(
+                title="Power / State of Charge over time",
+                xaxis=dict(title="Time"),
+                yaxis=dict(title="SoC (%)", rangemode="tozero"),
+                yaxis2=dict(title="Wh", overlaying="y", side="right"),
+                legend=dict(orientation="h"),
+                margin=dict(l=10, r=10, t=50, b=10),
+            )
+            st.plotly_chart(fig, use_container_width=True)
 
-        # ---- WATTS instead of Wh (your request) ----
-        dt_h = ts["t"].diff().dt.total_seconds().div(3600.0)
-        ts["Power_W"] = ts["PH_WH"].astype(float).diff().div(dt_h)
-        # Light smoothing to reduce spikes from any irregular dt
-        ts["Power_W"] = ts["Power_W"].rolling(3, min_periods=1, center=True).median()
-
-        # Plot Power only (no extra imports)
-        fig = px.line(ts, x="t", y="Power_W",
-                      labels={"t": "Time", "Power_W": "Power (W)"},
-                      title="Power (W) over time")
-        fig.update_layout(margin=dict(l=10, r=10, t=50, b=10))
-        st.plotly_chart(fig, use_container_width=True)
-
-        # Quick metrics
-        last_pwr = ts["Power_W"].dropna().iloc[-1] if ts["Power_W"].notna().any() else np.nan
-        st.metric("Last Power (W)", f"{last_pwr:.2f}" if pd.notna(last_pwr) else "—")
+            # Quick last-point indicators
+            last = ts.iloc[-1]
+            c1, c2 = st.columns(2)
+            with c1: st.metric("Last SoC_i (%)", f"{last['PH_SoCi']:.1f}")
+            with c2: st.metric("Last Energy (Wh)", f"{last['PH_WH']:.2f}")
