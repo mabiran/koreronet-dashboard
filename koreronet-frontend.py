@@ -1,28 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# KōreroNET Dashboard (with precompute splash + Drive)
+# KōreroNET Dashboard (with precompute splash + 24h headline)
 # ------------------------------------------------------------
-# - On landing: dark splash shows KōreroNET + AUT while we compute:
-#     "Past week: Top 3 singing birds (confidence > 0.95, BN+KN combined)"
-#   Then shows the headline. User clicks/taps to fade and enter the app.
-# - Tab 1: Root CSV heatmaps (Drive or local) with calendar + min confidence
-# - Tab 2: Verify using snapshot date; fetch chunks on demand from Drive
-# - Tab 3: Power graph (SoC_i 0–100 on left, Wh on right)
+# Landing flow:
+#   1) Show dark splash with KōreroNET + AUT + GeoEnviroSense while computing.
+#   2) Compute last-24h top species (BN + KN root CSVs; confidence threshold still used internally,
+#      but NOT mentioned in the text).
+#   3) Show a minimal sentence (no dates). On click/tap, fade and enter the app (no freeze).
+#
+# Tabs:
+#   - Tab 1: Root CSV heatmaps (Drive or local) with calendar + min confidence
+#   - Tab 2: Verify via snapshot date; on-demand chunk fetch
+#   - Tab 3: Power graph (SoC_i 0–100 left, Wh right)
 #
 # Streamlit secrets required:
 #   GDRIVE_FOLDER_ID = "your_root_folder_id"
-#   [service_account]
-#   type = "service_account"
-#   project_id = "..."
-#   private_key_id = "..."
-#   private_key = (paste PEM with real newlines, no \n escapes)
-#   client_email = "...@...iam.gserviceaccount.com"
-#   client_id = "..."
-#   auth_uri = "https://accounts.google.com/o/oauth2/auth"
-#   token_uri = "https://oauth2.googleapis.com/token"
-#   auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
-#   client_x509_cert_url = "https://www.googleapis.com/robot/v1/metadata/x509/...."
-#   universe_domain = "googleapis.com"
+#   [service_account] ... standard SA fields ...
 # ------------------------------------------------------------
 
 import os, io, re, glob, json, time
@@ -63,11 +56,9 @@ st.markdown("""
 }
 .overlay-inner {max-width: 1000px; padding: 2rem; text-align:center;}
 .overlay h1 {font-size: clamp(40px, 6vw, 80px); margin: 0 0 .2rem 0; font-weight: 900; letter-spacing: .01em;}
-.overlay h2 {font-size: clamp(22px, 3.2vw, 36px); margin: .2rem 0 1.2rem 0; font-weight: 700; opacity:.95;}
 .overlay p {font-size: clamp(16px, 2.2vw, 22px); opacity: .95; line-height: 1.35;}
-.overlay .cta {margin-top: 1.5rem;}
-.overlay .badge {display:inline-block; font-weight:700; font-size:.95rem; padding:.3rem .6rem; border:1px solid #3a3a3a; border-radius:999px; opacity:.9;}
-.overlay .logos {display:flex; gap:1rem; align-items:center; justify-content:center; margin-bottom: .6rem;}
+.overlay .cta {margin-top: 1.3rem;}
+.overlay .logos {display:flex; gap:.75rem; align-items:center; justify-content:center; margin-bottom: .8rem;}
 .logo-pill {font-weight:800; font-size:1.05rem; letter-spacing:.06em; border:1px solid #3a3a3a; border-radius:999px; padding:.35rem .7rem;}
 </style>
 """, unsafe_allow_html=True)
@@ -206,100 +197,60 @@ def list_csvs_drive_root(folder_id: str) -> Tuple[List[Dict[str, Any]], List[Dic
     bn.sort(key=lambda m: m.get("name","")); kn.sort(key=lambda m: m.get("name",""))
     return bn, kn
 
-@st.cache_data(show_spinner=False)
-def extract_dates_from_csv(path: str | Path) -> List[date]:
-    path = str(path)
-    dates = set()
-    try:
-        for chunk in pd.read_csv(path, usecols=["ActualTime"], chunksize=5000):
-            s = pd.to_datetime(chunk["ActualTime"], errors="coerce", dayfirst=True)
-            dates.update(ts.date() for ts in s.dropna())
-    except Exception:
-        try:
-            for chunk in pd.read_csv(path, chunksize=5000):
-                if "ActualTime" not in chunk.columns: continue
-                s = pd.to_datetime(chunk["ActualTime"], errors="coerce", dayfirst=True)
-                dates.update(ts.date() for ts in s.dropna())
-        except Exception:
-            return []
-    return sorted(dates)
-
-@st.cache_data(show_spinner=False)
-def build_date_index(paths: List[Path]) -> Dict[date, List[str]]:
-    idx: Dict[date, List[str]] = {}
-    for p in paths:
-        for d in extract_dates_from_csv(p):
-            idx.setdefault(d, []).append(str(p))
-    return idx
-
 def _standardize_chunk(chunk: pd.DataFrame, kind: str) -> pd.DataFrame:
     c = chunk.copy()
+
     # Confidence
-    conf_col = "Confidence" if "Confidence" in c.columns else None
-    if conf_col is None:
-        # try case-insensitive
-        for col in c.columns:
-            if col.lower() == "confidence":
-                conf_col = col; break
-    if conf_col is None:
-        c["Confidence"] = np.nan
-    else:
-        c["Confidence"] = pd.to_numeric(c[conf_col], errors="coerce")
+    conf_col = None
+    for col in c.columns:
+        if col.lower() == "confidence": conf_col = col; break
+    c["Confidence"] = pd.to_numeric(c[conf_col], errors="coerce") if conf_col else np.nan
 
     # Label
+    label_col = None
     if kind == "bn":
-        # Prefer Common name; attempt fallbacks
-        label_col = None
         for col in c.columns:
-            low = col.lower()
-            if low in ("common name","common_name","label","species","class"):
+            if col.lower() in ("common name","common_name","label","species","class"):
                 label_col = col; break
-        if label_col is None:
-            c["Label"] = "Unknown"
-        else:
-            c["Label"] = c[label_col].astype(str)
     else:
-        label_col = None
         for col in c.columns:
             if col.lower() in ("label","common name","common_name","species","class"):
                 label_col = col; break
-        c["Label"] = c[label_col].astype(str) if label_col else "Unknown"
+    c["Label"] = c[label_col].astype(str) if label_col else "Unknown"
 
     # Time
     at_col = None
     for col in c.columns:
-        if col.lower() == "actualtime":
-            at_col = col; break
+        if col.lower() == "actualtime": at_col = col; break
     c["ActualTime"] = pd.to_datetime(c[at_col], errors="coerce", dayfirst=True) if at_col else pd.NaT
+
     c = c.dropna(subset=["ActualTime", "Label"])
     return c[["Label","Confidence","ActualTime"]]
 
 @st.cache_data(show_spinner=True, ttl=600)
-def compute_weekly_top_species(
+def compute_recent_top_species(
     bn_paths: List[str|Path], kn_paths: List[str|Path],
-    conf_thresh: float = 0.95, days: int = 7
+    conf_thresh: float = 0.95, lookback_hours: int = 24
 ) -> Dict[str, Any]:
-    """Scan last `days` across BN+KN, confidence >= conf_thresh. Return dict with
-       'top3' (list), 'also' (list up to 2), 'since', 'until', 'total_rows'."""
-    since = date.today() - timedelta(days=days-1)
-    until = date.today()
+    """Scan last `lookback_hours` across BN+KN; return {'top3': [], 'also': [], 'n': int}."""
+    now = pd.Timestamp.now()
+    since = now - pd.Timedelta(hours=lookback_hours)
     counts: Dict[str,int] = {}
-    total_rows = 0
+    n_rows = 0
 
-    def _scan_paths(paths: List[str|Path], kind: str):
-        nonlocal total_rows
+    def _scan(paths: List[str|Path], kind: str):
+        nonlocal n_rows
         for p in paths:
             try:
                 for chunk in pd.read_csv(str(p), chunksize=5000):
                     std = _standardize_chunk(chunk, kind)
                     if std.empty: continue
-                    # filter by date & confidence
-                    m = (std["ActualTime"].dt.date >= since) & (std["ActualTime"].dt.date <= until)
+                    m = (std["ActualTime"] >= since) & (std["ActualTime"] <= now)
                     m &= (pd.to_numeric(std["Confidence"], errors="coerce") >= conf_thresh)
                     filt = std.loc[m, ["Label"]]
                     if filt.empty: continue
                     vc = filt["Label"].value_counts()
-                    total_rows += int(vc.sum())
+                    n_rows += int(vc.sum())
                     for label, n in vc.items():
                         if not label or str(label).lower() == "unknown":
                             continue
@@ -307,14 +258,14 @@ def compute_weekly_top_species(
             except Exception:
                 continue
 
-    _scan_paths([str(x) for x in bn_paths], "bn")
-    _scan_paths([str(x) for x in kn_paths], "kn")
+    _scan([str(x) for x in bn_paths], "bn")
+    _scan([str(x) for x in kn_paths], "kn")
 
     ordered = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)
     labels = [k for k,_ in ordered]
     top3 = labels[:3]
     also = labels[3:5]
-    return {"top3": top3, "also": also, "since": since, "until": until, "total_rows": total_rows}
+    return {"top3": top3, "also": also, "n": n_rows}
 
 def _english_join(items: List[str]) -> str:
     items = [s for s in items if s and s.strip()]
@@ -323,8 +274,17 @@ def _english_join(items: List[str]) -> str:
     if len(items) == 2: return f"{items[0]} and {items[1]}"
     return ", ".join(items[:-1]) + f", and {items[-1]}"
 
+def _build_minimal_sentence(res: Dict[str,Any]) -> str:
+    if not res or res.get("n", 0) == 0 or not res.get("top3"):
+        return ("In the last 24 hours, we didn’t record enough detections to summarise dominant singers "
+                "in the Auckland-Orakei region.")
+    top = _english_join(res["top3"])
+    also = _english_join(res.get("also", []))
+    extra = f" We also detected {also} and many more on Node 0." if also else " We also detected many more on Node 0."
+    return f"In the last 24 hours, {top} were the dominant birds singing in the Auckland-Orakei region." + extra
+
 # ─────────────────────────────────────────────────────────────
-# Precompute splash gate (runs before tabs)
+# Precompute gate (runs before tabs)
 # ─────────────────────────────────────────────────────────────
 def _load_root_csv_paths() -> Tuple[List[Path], List[Path]]:
     if drive_enabled():
@@ -353,69 +313,92 @@ def _render_branding(placeholder, subtitle="initialising…"):
             unsafe_allow_html=True,
         )
 
-def _render_gate_message(msg: str, since: date, until: date):
-    # Dark overlay with logos + message + button
+def _render_gate_message(msg: str):
     st.markdown(
         f"""
-        <div class="overlay {'fade-enter' if not st.session_state.get('overlay_fade', False) else 'fade-exit'}">
+        <div class="overlay" id="gate">
           <div class="overlay-inner">
             <div class="logos">
               <div class="logo-pill">KōreroNET</div>
               <div class="logo-pill">AUT</div>
+              <div class="logo-pill">GeoEnviroSense</div>
             </div>
             <h1>Listening to nature</h1>
-            <h2 class="badge">{since.isoformat()} → {until.isoformat()}</h2>
             <p>{msg}</p>
             <div class="cta">
         """,
         unsafe_allow_html=True,
     )
-    enter = st.button("Enter dashboard", type="primary", use_container_width=False, key="gate_enter_btn")
+    # Big button that always works; on click, we fade then rerun.
+    clicked = st.button("Enter dashboard", type="primary", key="gate_enter_btn")
     st.markdown("</div></div></div>", unsafe_allow_html=True)
-    return enter
-
-def _build_headline_text(res: Dict[str,Any]) -> str:
-    if not res or res.get("total_rows", 0) == 0 or not res.get("top3"):
-        return ("In the past week we didn’t record enough high-confidence detections "
-                "(confidence > 0.95, BN+KN combined) to identify dominant singers in Auckland.")
-    top = _english_join(res["top3"])
-    also = _english_join(res.get("also", []))
-    extra = f" We also detected {also}." if also else ""
-    return (f"In the past week, <strong>{top}</strong> were the dominant birds singing in Auckland "
-            f"(confidence &gt; 0.95, BN+KN combined).{extra}")
+    return clicked
 
 def run_precompute_gate():
-    # If user already entered, skip gate
+    # Skip gate entirely once opened
     if st.session_state.get("gate_open", False):
         return
 
-    # Phase 1: show branding while we locate CSVs and compute weekly stats
+    # Phase 1: show branding while we load & compute
     brand_ph = st.empty()
-    _render_branding(brand_ph, subtitle="loading data & analysing the last 7 days…")
+    _render_branding(brand_ph, subtitle="loading data & analysing the last 24 hours…")
 
+    # Compute recent top species
     bn_paths, kn_paths = _load_root_csv_paths()
-    weekly = compute_weekly_top_species(bn_paths, kn_paths, conf_thresh=0.95, days=7)
-    headline = _build_headline_text(weekly)
+    recent = compute_recent_top_species(bn_paths, kn_paths, conf_thresh=0.95, lookback_hours=24)
+    headline = _build_minimal_sentence(recent)
 
-    # Phase 2: replace with dark overlay + message; wait for user click
-    brand_ph.empty()  # logos remain re-rendered in overlay
-    clicked = _render_gate_message(headline, weekly.get("since", date.today()-timedelta(days=6)), weekly.get("until", date.today()))
-    if clicked:
-        # Fade once, then enter
-        st.session_state["overlay_fade"] = True
-        time.sleep(0.48)  # allow CSS fade-out
+    # Phase 2: overlay with message and button
+    brand_ph.empty()
+    if _render_gate_message(headline):
+        # Visual fade, then open gate; ensure no freeze
+        fade_ph = st.empty()
+        with fade_ph.container():
+            st.markdown('<div class="overlay fade-exit"></div>', unsafe_allow_html=True)
+        time.sleep(0.35)
         st.session_state["gate_open"] = True
         st.rerun()
     else:
-        # Do not build the rest of the app yet
+        # Hold here until user clicks
         st.stop()
 
-# Run the gate before anything else UI-heavy
+# Run the gate before building the rest of the UI
 run_precompute_gate()
 
 # ─────────────────────────────────────────────────────────────
-# Tab 1 heatmap rendering helpers
+# Node Select (top bar)
 # ─────────────────────────────────────────────────────────────
+node = st.selectbox("Node Select", ["Auckland-Orākei"], index=0, key="node_select_top")
+
+# ─────────────────────────────────────────────────────────────
+# Tab 1 (root CSV heatmap)
+# ─────────────────────────────────────────────────────────────
+@st.cache_data(show_spinner=False)
+def extract_dates_from_csv(path: str | Path) -> List[date]:
+    path = str(path)
+    dates = set()
+    try:
+        for chunk in pd.read_csv(path, usecols=["ActualTime"], chunksize=5000):
+            s = pd.to_datetime(chunk["ActualTime"], errors="coerce", dayfirst=True)
+            dates.update(ts.date() for ts in s.dropna())
+    except Exception:
+        try:
+            for chunk in pd.read_csv(path, chunksize=5000):
+                if "ActualTime" not in chunk.columns: continue
+                s = pd.to_datetime(chunk["ActualTime"], errors="coerce", dayfirst=True)
+                dates.update(ts.date() for ts in s.dropna())
+        except Exception:
+            return []
+    return sorted(dates)
+
+@st.cache_data(show_spinner=False)
+def build_date_index(paths: List[Path]) -> Dict[date, List[str]]:
+    idx: Dict[date, List[str]] = {}
+    for p in paths:
+        for d in extract_dates_from_csv(p):
+            idx.setdefault(d, []).append(str(p))
+    return idx
+
 def standardize_df(df: pd.DataFrame, kind: str) -> pd.DataFrame:
     df = df.copy()
     df["Confidence"] = pd.to_numeric(df.get("Confidence", np.nan), errors="coerce")
@@ -512,6 +495,13 @@ with tab1:
     with center.container():
         st.markdown('<div class="center-wrap"><div>🧮 Building date index…</div></div>', unsafe_allow_html=True)
 
+    def build_date_index(paths: List[Path]) -> Dict[date, List[str]]:
+        idx: Dict[date, List[str]] = {}
+        for p in paths:
+            for d in extract_dates_from_csv(p):
+                idx.setdefault(d, []).append(str(p))
+        return idx
+
     bn_by_date = build_date_index(bn_paths) if bn_paths else {}
     kn_by_date = build_date_index(kn_paths) if kn_paths else {}
 
@@ -605,8 +595,14 @@ def _match_master_name(n: str, kind: str) -> bool:
     else:
         return (("birdnet" in n) and ("detect" in n) and n.endswith(".csv"))
 
+def list_children_safe(folder_id: str) -> List[Dict[str, Any]]:
+    try:
+        return list_children(folder_id, max_items=2000)
+    except Exception:
+        return []
+
 def _find_master_anywhere(snapshot_id: str, kind: str) -> Optional[Dict[str, Any]]:
-    root_kids = list_children(snapshot_id, max_items=2000)
+    root_kids = list_children_safe(snapshot_id)
     files_only = [f for f in root_kids if f.get("mimeType") != "application/vnd.google-apps.folder"]
     cands = [f for f in files_only if _match_master_name(f.get("name",""), kind)]
     if cands:
@@ -614,7 +610,7 @@ def _find_master_anywhere(snapshot_id: str, kind: str) -> Optional[Dict[str, Any
         return dict(cands[0])
     subfolders = [f for f in root_kids if f.get("mimeType") == "application/vnd.google-apps.folder"]
     for sf in subfolders:
-        sub_files = list_children(sf["id"], max_items=2000)
+        sub_files = list_children_safe(sf["id"])
         sub_files = [f for f in sub_files if f.get("mimeType") != "application/vnd.google-apps.folder"]
         c2 = [f for f in sub_files if _match_master_name(f.get("name",""), kind)]
         if c2:
@@ -726,6 +722,21 @@ with tab_verify:
         st.info("No rows above the selected confidence."); st.stop()
 
     avail_days = sorted(pool["Date"].unique())
+    def calendar_pick(available_days: List[date], label: str, help_txt: str = "") -> date:
+        available_days = sorted(available_days)
+        d_min, d_max = available_days[0], available_days[-1]
+        d_val = st.date_input(label, value=d_max, min_value=d_min, max_value=d_max, help=help_txt)
+        if d_val not in set(available_days):
+            earlier = [x for x in available_days if x <= d_val]
+            if earlier:
+                d_val = earlier[-1]
+                st.info(f"No data on chosen date; showing {d_val.isoformat()} (nearest earlier).")
+            else:
+                later = [x for x in available_days if x >= d_val]
+                d_val = later[0]
+                st.info(f"No data on chosen date; showing {d_val.isoformat()} (nearest later).")
+        return d_val
+
     day_pick = calendar_pick(list(avail_days), "Day", "Dates come from snapshot folder names under Backup/.")
 
     day_df = pool[pool["Date"] == day_pick]
@@ -906,14 +917,8 @@ with tab3:
             st.warning("No parsable power logs found.")
         else:
             fig = go.Figure()
-            # SoC_i (%) on y1
-            fig.add_trace(go.Scatter(
-                x=ts["t"], y=ts["PH_SoCi"], mode="lines", name="SoC_i (%)", yaxis="y1"
-            ))
-            # Wh on y2
-            fig.add_trace(go.Scatter(
-                x=ts["t"], y=ts["PH_WH"], mode="lines", name="Energy (Wh)", yaxis="y2"
-            ))
+            fig.add_trace(go.Scatter(x=ts["t"], y=ts["PH_SoCi"], mode="lines", name="SoC_i (%)", yaxis="y1"))
+            fig.add_trace(go.Scatter(x=ts["t"], y=ts["PH_WH"],   mode="lines", name="Energy (Wh)", yaxis="y2"))
 
             fig.update_layout(
                 title="Power / State of Charge over time",
@@ -925,7 +930,6 @@ with tab3:
             )
             st.plotly_chart(fig, use_container_width=True)
 
-            # Quick last-point indicators
             last = ts.iloc[-1]
             c1, c2 = st.columns(2)
             with c1: st.metric("Last SoC_i (%)", f"{last['PH_SoCi']:.1f}")
