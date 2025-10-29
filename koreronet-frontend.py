@@ -25,40 +25,34 @@ import streamlit as st
 st.set_page_config(page_title="KōreroNET Dashboard", layout="wide")
 st.markdown("""
 <style>
-.block-container {padding-top:1rem; padding-bottom:1rem;}
-.center-wrap {display:flex; align-items:center; justify-content:center; min-height:65vh; text-align:center;}
-.brand-title {font-size: clamp(48px, 8vw, 96px); font-weight: 800; letter-spacing: .02em;}
-.brand-sub {font-size: clamp(28px, 4vw, 48px); font-weight: 600; opacity:.9; margin-top:.4rem;}
-.fade-enter {animation: fadeIn 400ms ease forwards;}
-.fade-exit  {animation: fadeOut 350ms ease forwards;}
-@keyframes fadeIn { from {opacity:0} to {opacity:1} }
-@keyframes fadeOut { from {opacity:1} to {opacity:0} }
-.pulse {position:relative; width:14px; height:14px; margin:18px auto 0; border-radius:50%; background:#16a34a; box-shadow:0 0 0 rgba(22,163,74,.7); animation: pulse 1.6s infinite;}
-@keyframes pulse { 0%{ box-shadow:0 0 0 0 rgba(22,163,74,.7);} 70%{ box-shadow:0 0 0 22px rgba(22,163,74,0);} 100%{ box-shadow:0 0 0 0 rgba(22,163,74,0);} }
-.stTabs [role="tablist"] {gap:.5rem;}
-.stTabs [role="tab"] {padding:.6rem 1rem; border-radius:999px; border:1px solid #3a3a3a;}
-.small {font-size:0.9rem; opacity:0.85;}
-
-.hero-bg {
+.hero-wrap{
+  display:grid; align-content:start; justify-items:center; gap:.25rem;
+  margin:.75rem auto 0; padding:1rem 1rem 1.25rem; max-width:1100px;
+  border-radius:24px;
   background: radial-gradient(1000px 500px at 50% -10%, #1a1a1a 0%, #0b0b0b 60%, #070707 100%);
-  border-radius: 24px;
-  padding: 2rem 1rem;
 }
-.logos {display:flex; gap:.75rem; align-items:center; justify-content:center; margin-bottom:.8rem;}
-.logo-pill {font-weight:800; font-size:1.05rem; letter-spacing:.06em; border:1px solid #3a3a3a; border-radius:999px; padding:.35rem .7rem;}
-.hero-h1 {font-size: clamp(40px, 6vw, 80px); margin:.2rem 0 .6rem 0; font-weight: 900; letter-spacing: .01em;}
-.hero-p  {font-size: clamp(16px, 2.2vw, 22px); opacity: .95; line-height: 1.35; max-width: 1000px; margin: 0 auto;}
-.hero-cta {margin-top: 1.3rem;}
-div.stButton > button[kind="primary"] {padding: .7rem 1.2rem; font-weight: 700; border-radius: 999px;}
-.full-fade {position:fixed; inset:0; background:#000; opacity:1;}
-
-/* --- FIX GAP ON HERO: neutralize global min-height inside hero only --- */
-.hero-bg .center-wrap { min-height: 0 !important; }
-.logos { margin-bottom: .35rem !important; }
-.hero-h1 { margin-top: .15rem !important; }
+/* kill any inherited tall min-height from .center-wrap */
+.hero-wrap .center-wrap{ min-height:0 !important; }
+.logos{ display:flex; gap:.75rem; align-items:center; justify-content:center; margin:.1rem 0 .35rem 0; }
+.logo-pill{ font-weight:800; font-size:1.05rem; letter-spacing:.06em; border:1px solid #3a3a3a; border-radius:999px; padding:.35rem .7rem; }
+.hero-h1{ font-size:clamp(40px,6vw,80px); margin:.1rem 0 .5rem 0; font-weight:900; letter-spacing:.01em; }
+.hero-p{ font-size:clamp(16px,2.2vw,22px); opacity:.95; line-height:1.35; max-width:1000px; margin:0 auto; }
+.hero-cta{ margin-top:1.0rem; }
 </style>
 """, unsafe_allow_html=True)
+st.markdown(f"""
+<div class="hero-wrap">
+  <div class="logos">
+    <span class="logo-pill">KōreroNET</span>
+    <span class="logo-pill">AUT</span>
+    <span class="logo-pill">GeoEnviroSense</span>
+  </div>
+  <h1 class="hero-h1">listening to nature</h1>
+  <p class="hero-p">{headline}</p>
+</div>
+""", unsafe_allow_html=True)
 
+enter = st.button("Enter dashboard", type="primary", key="gate_enter_btn")
 
 # ─────────────────────────────────────────────────────────────
 # Caches & local fallback
