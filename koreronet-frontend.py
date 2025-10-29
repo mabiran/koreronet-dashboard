@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-KōreroNET Dashboard — Tab 1 unchanged, Tab 2 fixed to use snapshot-date calendar.
-
-Tab 2 now:
-• Dates come from the parent snapshot folder name: Backup/YYYYMMDD_HHMMSS → date = YYYY-MM-DD
-• No time-of-day parsing; playlist rows show Date + File only.
-• Calendar input (min/max) with safe snapping to a day that has data.
-• Audio fetched on-demand from 'koreronet' / 'birdnet' under that snapshot.
+KōreroNET Dashboard
+- Tab 1: root CSV heatmaps (Drive or local) — button now "Show results".
+- Tab 2: verify via snapshot-date calendar + master CSVs + on-demand chunk fetch.
+- Tab 3: Power graph from 'From the node/Power logs' (Drive). Reads latest 7 logs, stitches hourly arrays.
 """
 
 import os, io, re, glob, json
@@ -18,6 +15,7 @@ from typing import Dict, Any, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 # ─────────────────────────────────────────────────────────────
@@ -43,7 +41,8 @@ st.title("KōreroNET • Daily Dashboard")
 CACHE_ROOT   = Path("/tmp/koreronet_cache")
 CSV_CACHE    = CACHE_ROOT / "csv"
 CHUNK_CACHE  = CACHE_ROOT / "chunks"
-for _p in (CSV_CACHE, CHUNK_CACHE):
+POWER_CACHE  = CACHE_ROOT / "power"
+for _p in (CSV_CACHE, CHUNK_CACHE, POWER_CACHE):
     _p.mkdir(parents=True, exist_ok=True)
 
 DEFAULT_ROOT = r"G:\My Drive\From the node"
@@ -126,6 +125,7 @@ def ensure_chunk_cached(chunk_name: str, folder_id: str, subdir: str) -> Optiona
     local_path = CHUNK_CACHE / subdir / chunk_name
     if local_path.exists():
         return local_path
+    # Fetch file by name
     for k in list_children(folder_id, max_items=2000):
         if k.get("name") == chunk_name:
             try:
@@ -135,8 +135,16 @@ def ensure_chunk_cached(chunk_name: str, folder_id: str, subdir: str) -> Optiona
                 return None
     return None
 
+def find_subfolder_by_name(root_id: str, name_ci: str) -> Optional[Dict[str, Any]]:
+    """Case-insensitive single-level search."""
+    kids = list_children(root_id, max_items=2000)
+    for k in kids:
+        if k.get("mimeType")=="application/vnd.google-apps.folder" and k.get("name","").lower()==name_ci.lower():
+            return k
+    return None
+
 # ─────────────────────────────────────────────────────────────
-# Tab 1 (unchanged logic) — local or Drive root bn*/kn*
+# Tab 1 (root CSV heatmap)
 # ─────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def list_csvs_local(root: str) -> Tuple[List[str], List[str]]:
@@ -224,9 +232,6 @@ def make_heatmap(df: pd.DataFrame, min_conf: float, title: str):
 def load_csv(path: str | Path) -> pd.DataFrame:
     return pd.read_csv(str(path))
 
-# ─────────────────────────────────────────────────────────────
-# Shared utility: calendar with safe snapping
-# ─────────────────────────────────────────────────────────────
 def calendar_pick(available_days: List[date], label: str, help_txt: str = "") -> date:
     if not available_days:
         st.stop()
@@ -245,7 +250,7 @@ def calendar_pick(available_days: List[date], label: str, help_txt: str = "") ->
     return d_val
 
 # ─────────────────────────────────────────────────────────────
-# Snapshot & Master CSV logic for Tab 2 (date = from folder name)
+# Snapshot/master logic for Tab 2
 # ─────────────────────────────────────────────────────────────
 SNAP_RE = re.compile(r"^(\d{8})_(\d{6})$", re.IGNORECASE)
 
@@ -282,10 +287,7 @@ def _find_chunk_dirs(snapshot_id: str) -> Dict[str, str]:
     kids = list_children(snapshot_id, max_items=2000)
     kn = [k for k in kids if k.get("mimeType")=="application/vnd.google-apps.folder" and "koreronet" in k.get("name","").lower()]
     bn = [k for k in kids if k.get("mimeType")=="application/vnd.google-apps.folder" and "birdnet"   in k.get("name","").lower()]
-    return {
-        "KN": (kn[0]["id"] if kn else snapshot_id),
-        "BN": (bn[0]["id"] if bn else snapshot_id),
-    }
+    return {"KN": (kn[0]["id"] if kn else snapshot_id), "BN": (bn[0]["id"] if bn else snapshot_id)}
 
 def _match_master_name(name: str, kind: str) -> bool:
     n = name.lower()
@@ -301,7 +303,6 @@ def _find_master_anywhere(snapshot_id: str, kind: str) -> Optional[Dict[str, Any
     if cands:
         cands.sort(key=lambda m: m.get("modifiedTime",""), reverse=True)
         return dict(cands[0])
-    # one-level down
     subfolders = [f for f in root_kids if f.get("mimeType") == "application/vnd.google-apps.folder"]
     for sf in subfolders:
         sub_files = list_children(sf["id"], max_items=2000)
@@ -314,31 +315,21 @@ def _find_master_anywhere(snapshot_id: str, kind: str) -> Optional[Dict[str, Any
 
 @st.cache_data(show_spinner=True)
 def build_master_index_by_snapshot_date(root_folder_id: str) -> pd.DataFrame:
-    """
-    Returns rows with date taken from the snapshot folder name (YYYYMMDD_HHMMSS).
-    Columns:
-    ['Date','Kind','Label','Confidence','Start','End','WavBase','ChunkName',
-     'ChunkDriveFolderId','SnapId','SnapName']
-    """
     backup = _find_backup_folder(root_folder_id)
     if not backup:
         return pd.DataFrame(columns=[
             "Date","Kind","Label","Confidence","Start","End","WavBase","ChunkName",
             "ChunkDriveFolderId","SnapId","SnapName"
         ])
-
     snaps = [k for k in list_children(backup["id"], max_items=2000)
              if k.get("mimeType")=="application/vnd.google-apps.folder" and SNAP_RE.match(k.get("name",""))]
     snaps.sort(key=lambda m: m.get("name",""), reverse=True)
 
     rows: List[Dict[str,Any]] = []
     for sn in snaps:
-        snap_id   = sn["id"]
-        snap_name = sn["name"]
+        snap_id, snap_name = sn["id"], sn["name"]
         snap_date = _parse_date_from_snapname(snap_name)
-        if not snap_date:
-            continue
-
+        if not snap_date: continue
         chunk_dirs = _find_chunk_dirs(snap_id)
 
         # KN
@@ -403,7 +394,6 @@ def build_master_index_by_snapshot_date(root_folder_id: str) -> pd.DataFrame:
             "ChunkDriveFolderId","SnapId","SnapName"
         ])
     out = pd.DataFrame(rows)
-    # stable order: newest snapshots first, then by Kind/Label
     out.sort_values(["Date","Kind","Label"], ascending=[False, True, True], inplace=True)
     out.reset_index(drop=True, inplace=True)
     return out
@@ -411,7 +401,7 @@ def build_master_index_by_snapshot_date(root_folder_id: str) -> pd.DataFrame:
 # ─────────────────────────────────────────────────────────────
 # Tabs
 # ─────────────────────────────────────────────────────────────
-tab1, tab_verify, tab3 = st.tabs(["📊 Detections", "🎧 Verify recordings", "📁 Drive"])
+tab1, tab_verify, tab3 = st.tabs(["📊 Detections", "🎧 Verify recordings", "⚡ Power"])
 
 # =========================
 # TAB 1 — Detections (root)
@@ -476,7 +466,7 @@ with tab1:
                 pass
         return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
-    if st.button("Update", type="primary"):
+    if st.button("Show results", type="primary"):
         with st.spinner("Rendering heatmap…"):
             if src == "BirdNET (bn)":
                 make_heatmap(load_and_filter(bn_by_date.get(d, []), "bn", d), min_conf, f"BirdNET • {d.isoformat()}")
@@ -504,7 +494,6 @@ with tab_verify:
         st.warning("No master CSVs found in any snapshot (looked in snapshot root and one-level subfolders).")
         st.stop()
 
-    # Source + confidence
     colA, colB = st.columns([2,1])
     with colA:
         src_mode_v = st.selectbox("Source", ["KōreroNET (KN)", "BirdNET (BN)", "Combined"], index=0)
@@ -521,7 +510,6 @@ with tab_verify:
     if pool.empty:
         st.info("No rows above the selected confidence."); st.stop()
 
-    # Calendar built from snapshot dates (not file times)
     avail_days = sorted(pool["Date"].unique())
     day_pick = calendar_pick(list(avail_days), "Day", "Dates come from snapshot folder names under Backup/.")
 
@@ -538,10 +526,8 @@ with tab_verify:
         key=f"verify_species::{day_pick.isoformat()}::{src_mode_v}",
     )
 
-    # Playlist for that label on that snapshot date (order by file name for stability)
     playlist = day_df[day_df["Label"] == species].sort_values(["WavBase","Kind"]).reset_index(drop=True)
 
-    # Controls
     idx_key = f"v2_idx::{day_pick.isoformat()}::{src_mode_v}::{species}"
     if idx_key not in st.session_state: st.session_state[idx_key] = 0
     idx = st.session_state[idx_key] % len(playlist)
@@ -585,17 +571,172 @@ with tab_verify:
     _play_audio(row, autoplay)
 
 # =====================
-# TAB 3 — Drive browser
+# TAB 3 — Power graph
 # =====================
 with tab3:
+    st.subheader("Node Power History")
     if not DRIVE_ENABLED:
-        st.info("Drive not configured. Set GDRIVE_FOLDER_ID and service_account in secrets.")
-    else:
-        st.caption("Top-level of Drive Folder ID")
-        with st.spinner("Listing…"):
-            kids = list_children(GDRIVE_FOLDER_ID, max_items=500)
-        st.dataframe(
-            [{"name": k.get("name"), "id": k.get("id"), "mimeType": k.get("mimeType"),
-              "modifiedTime": k.get("modifiedTime"), "size": k.get("size")} for k in kids],
-            use_container_width=True, hide_index=True
-        )
+        st.error("Google Drive is not configured in secrets."); st.stop()
+
+    # Locate 'Power logs' under the Drive root
+    logs_folder = find_subfolder_by_name(GDRIVE_FOLDER_ID, "Power logs")
+    if not logs_folder:
+        st.warning("Could not find 'Power logs' folder under the Drive root.")
+        st.stop()
+
+    LOG_RE = re.compile(r"^power_history_(\d{8})_(\d{6})\.log$", re.IGNORECASE)
+
+    @st.cache_data(show_spinner=True)
+    def list_power_logs(folder_id: str) -> List[Dict[str, Any]]:
+        kids = list_children(folder_id, max_items=2000)
+        files = [k for k in kids if k.get("mimeType") != "application/vnd.google-apps.folder" and LOG_RE.match(k.get("name",""))]
+        # Sort newest first by name timestamp
+        files.sort(key=lambda m: m.get("name",""), reverse=True)
+        return files
+
+    @st.cache_data(show_spinner=False)
+    def ensure_log_cached(meta: Dict[str, Any]) -> Path:
+        local_path = POWER_CACHE / meta["name"]
+        if not local_path.exists():
+            download_to(local_path, meta["id"])
+        return local_path
+
+    def _parse_float_list(line: str) -> List[float]:
+        # after the prefix "PH_XXX," split commas, strip trailing punctuation
+        try:
+            payload = line.split(",", 1)[1]
+        except Exception:
+            return []
+        vals = []
+        for tok in payload.strip().split(","):
+            tok = tok.strip().rstrip(".")  # some lines might end with a dot
+            try:
+                vals.append(float(tok))
+            except Exception:
+                pass
+        return vals
+
+    def parse_power_log(path: Path) -> Optional[pd.DataFrame]:
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            return None
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
+        if not lines: return None
+
+        # Header timestamp (first line)
+        try:
+            head_dt = datetime.strptime(lines[0], "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            # Try to find a datetime somewhere in line 1–2
+            head_dt = None
+            for l in lines[:3]:
+                m = re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", l)
+                if m:
+                    try:
+                        head_dt = datetime.strptime(m.group(0), "%Y-%m-%d %H:%M:%S")
+                        break
+                    except Exception:
+                        pass
+        if head_dt is None:
+            return None
+
+        # Arrays
+        wh_line   = next((l for l in lines if l.upper().startswith("PH_WH")),   "")
+        mah_line  = next((l for l in lines if l.upper().startswith("PH_MAH")),  "")
+        soci_line = next((l for l in lines if l.upper().startswith("PH_SOCI")), "")
+        socv_line = next((l for l in lines if l.upper().startswith("PH_SOCV")), "")
+
+        WH   = _parse_float_list(wh_line)
+        mAh  = _parse_float_list(mah_line)
+        SoCi = _parse_float_list(soci_line)
+        SoCv = _parse_float_list(socv_line)
+
+        L = max(len(WH), len(mAh), len(SoCi), len(SoCv))
+        if L == 0: return None
+
+        # If any list shorter, pad with NaN on the left
+        def _pad_left(arr: List[float], n: int) -> List[float]:
+            return [np.nan]*(n-len(arr)) + arr if len(arr) < n else arr[:n]
+
+        WH   = _pad_left(WH,   L)
+        mAh  = _pad_left(mAh,  L)
+        SoCi = _pad_left(SoCi, L)
+        SoCv = _pad_left(SoCv, L)
+
+        # Build time axis: last element corresponds to head_dt
+        times = [head_dt - timedelta(hours=(L-1 - i)) for i in range(L)]
+        df = pd.DataFrame({"t": times, "PH_WH": WH, "PH_mAh": mAh, "PH_SoCi": SoCi, "PH_SoCv": SoCv})
+        return df
+
+    @st.cache_data(show_spinner=True)
+    def build_power_timeseries(folder_id: str, latest_n: int = 7) -> pd.DataFrame:
+        files = list_power_logs(folder_id)
+        if not files:
+            return pd.DataFrame(columns=["t","PH_WH","PH_mAh","PH_SoCi","PH_SoCv"])
+        frames: List[pd.DataFrame] = []
+        for meta in files[:max(1, latest_n)]:
+            local = ensure_log_cached(meta)
+            df = parse_power_log(local)
+            if df is not None and not df.empty:
+                frames.append(df)
+        if not frames:
+            return pd.DataFrame(columns=["t","PH_WH","PH_mAh","PH_SoCi","PH_SoCv"])
+        merged = pd.concat(frames, ignore_index=True)
+        # Deduplicate on timestamp, keep the last (newer file assumed last in concat order if we processed chronologically)
+        merged.sort_values("t", inplace=True)
+        merged = merged.drop_duplicates(subset=["t"], keep="last")
+        merged.reset_index(drop=True, inplace=True)
+        return merged
+
+    cols = st.columns([2,1,1])
+    with cols[0]:
+        lookback = st.number_input("How many latest logs to stitch", min_value=3, max_value=50, value=7, step=1)
+    with cols[1]:
+        show_socv = st.checkbox("Show SoC_v", value=True)
+    with cols[2]:
+        show_mah  = st.checkbox("Show mAh", value=False)
+
+    if st.button("Show results", type="primary"):
+        with st.spinner("Building power time-series…"):
+            ts = build_power_timeseries(logs_folder["id"], latest_n=int(lookback))
+
+        if ts.empty:
+            st.warning("No parsable power logs found.")
+        else:
+            fig = go.Figure()
+            # SoC_i (%)
+            fig.add_trace(go.Scatter(
+                x=ts["t"], y=ts["PH_SoCi"], mode="lines", name="SoC_i (%)", yaxis="y1"
+            ))
+            # Optional SoC_v (%)
+            if show_socv:
+                fig.add_trace(go.Scatter(
+                    x=ts["t"], y=ts["PH_SoCv"], mode="lines", name="SoC_v (%)", yaxis="y1", line=dict(dash="dash")
+                ))
+            # Wh (2nd axis)
+            fig.add_trace(go.Scatter(
+                x=ts["t"], y=ts["PH_WH"], mode="lines", name="Energy (Wh)", yaxis="y2"
+            ))
+            # Optional mAh (2nd axis)
+            if show_mah:
+                fig.add_trace(go.Scatter(
+                    x=ts["t"], y=ts["PH_mAh"], mode="lines", name="Charge (mAh)", yaxis="y2", line=dict(dash="dot")
+                ))
+
+            fig.update_layout(
+                title="Power / State of Charge over time",
+                xaxis=dict(title="Time"),
+                yaxis=dict(title="SoC (%)", rangemode="tozero"),
+                yaxis2=dict(title="Wh / mAh", overlaying="y", side="right"),
+                legend=dict(orientation="h"),
+                margin=dict(l=10, r=10, t=50, b=10),
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Quick last-point indicators
+            last = ts.iloc[-1]
+            c1, c2, c3 = st.columns(3)
+            with c1: st.metric("Last SoC_i (%)", f"{last['PH_SoCi']:.1f}")
+            with c2: st.metric("Last SoC_v (%)", f"{last['PH_SoCv']:.1f}")
+            with c3: st.metric("Last Energy (Wh)", f"{last['PH_WH']:.2f}")
