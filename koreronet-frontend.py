@@ -1,14 +1,32 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-KōreroNET Dashboard
-- Tab 1: root CSV heatmaps (Drive or local) — button now "Show results" with a unique key.
-- Tab 2: verify via snapshot-date calendar + master CSVs + on-demand chunk fetch.
-- Tab 3: Power graph from 'From the node/Power logs' (Drive). Reads latest N logs, stitches hourly arrays.
-  • Always shows SoC_i (%) and Wh on dual axes. No extra checkboxes.
-"""
+# KōreroNET Dashboard (with splash + Drive)
+# ------------------------------------------------------------
+# - Splash screen (“KōreroNET” + “AUT”) for ~2s, then main UI
+# - Node Select at top (single option: Auckland-Orākei)
+# - Tab 1: Root CSV heatmaps (Drive or local) with calendar + min confidence
+# - Tab 2: Verify using snapshot date (Backup/YYYYMMDD_HHMMSS) and master CSVs;
+#          on-demand audio chunk fetch from Drive (no full directory downloads).
+# - Tab 3: Power graph from "Power logs" (Drive), stitches latest N logs;
+#          dual y-axes: SoC_i (%) and Wh.
+#
+# Streamlit secrets required:
+#   GDRIVE_FOLDER_ID = "your_root_folder_id"
+#   [service_account]
+#   type = "service_account"
+#   project_id = "..."
+#   private_key_id = "..."
+#   private_key = (paste PEM with real newlines, no \n escapes)
+#   client_email = "...@...iam.gserviceaccount.com"
+#   client_id = "..."
+#   auth_uri = "https://accounts.google.com/o/oauth2/auth"
+#   token_uri = "https://oauth2.googleapis.com/token"
+#   auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
+#   client_x509_cert_url = "https://www.googleapis.com/robot/v1/metadata/x509/...."
+#   universe_domain = "googleapis.com"
+# ------------------------------------------------------------
 
-import os, io, re, glob, json
+import os, io, re, glob, json, time
 from pathlib import Path
 from datetime import date, datetime, timedelta
 from typing import Dict, Any, List, Optional, Tuple
@@ -26,15 +44,43 @@ st.set_page_config(page_title="KōreroNET Dashboard", layout="wide")
 st.markdown("""
 <style>
 .block-container {padding-top:1rem; padding-bottom:1rem;}
-.center-wrap {display:flex; align-items:center; justify-content:center; min-height:140px;}
-.fade {opacity:0.95; transition: opacity 300ms ease-in-out;}
+.center-wrap {display:flex; align-items:center; justify-content:center; min-height:65vh; text-align:center;}
+.brand-title {font-size: clamp(48px, 8vw, 96px); font-weight: 800; letter-spacing: .02em;}
+.brand-sub {font-size: clamp(28px, 4vw, 48px); font-weight: 600; opacity:.9; margin-top:.4rem;}
+.fade-enter {animation: fadeIn 400ms ease forwards;}
+.fade-exit  {animation: fadeOut 400ms ease forwards;}
+@keyframes fadeIn { from {opacity:0} to {opacity:1} }
+@keyframes fadeOut { from {opacity:1} to {opacity:0} }
+.pulse {position:relative; width:14px; height:14px; margin:18px auto 0; border-radius:50%; background:#16a34a; box-shadow:0 0 0 rgba(22,163,74,.7); animation: pulse 1.6s infinite;}
+@keyframes pulse { 0%{ box-shadow:0 0 0 0 rgba(22,163,74,.7);} 70%{ box-shadow:0 0 0 22px rgba(22,163,74,0);} 100%{ box-shadow:0 0 0 0 rgba(22,163,74,0);} }
 .stTabs [role="tablist"] {gap:.5rem;}
 .stTabs [role="tab"] {padding:.6rem 1rem; border-radius:999px; border:1px solid #3a3a3a;}
 .small {font-size:0.9rem; opacity:0.85;}
 </style>
 """, unsafe_allow_html=True)
 
-st.title("KōreroNET • Daily Dashboard")
+# ─────────────────────────────────────────────────────────────
+# Simple splash gate
+# ─────────────────────────────────────────────────────────────
+if "splash_done" not in st.session_state:
+    placeholder = st.empty()
+    with placeholder.container():
+        st.markdown(
+            """
+            <div class="center-wrap fade-enter">
+              <div>
+                <div class="brand-title">KōreroNET</div>
+                <div class="brand-sub">AUT</div>
+                <div class="pulse"></div>
+                <div class="small" style="margin-top:10px;">initialising…</div>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    time.sleep(2.0)
+    st.session_state["splash_done"] = True
+    st.rerun()
 
 # ─────────────────────────────────────────────────────────────
 # Caches & local fallback
@@ -49,9 +95,14 @@ for _p in (CSV_CACHE, CHUNK_CACHE, POWER_CACHE):
 DEFAULT_ROOT = r"G:\My Drive\From the node"
 ROOT_LOCAL   = os.getenv("KORERONET_DATA_ROOT", DEFAULT_ROOT)
 
+# Node Select (top bar)
+node = st.selectbox("Node Select", ["Auckland-Orākei"], index=0, key="node_select_top")
+
 # ─────────────────────────────────────────────────────────────
-# Drive client
+# Secrets / Drive builders
 # ─────────────────────────────────────────────────────────────
+GDRIVE_FOLDER_ID = st.secrets.get("GDRIVE_FOLDER_ID", None)
+
 def _normalize_private_key(pk: str) -> str:
     if not isinstance(pk, str): return pk
     if "\\n" in pk: pk = pk.replace("\\n", "\n")
@@ -62,7 +113,7 @@ def _normalize_private_key(pk: str) -> str:
             pk = pk.replace("-----END PRIVATE KEY-----", "\n-----END PRIVATE KEY-----", 1)
     return pk
 
-def build_drive():
+def _build_drive_client():
     try:
         from google.oauth2 import service_account
         from googleapiclient.discovery import build
@@ -80,14 +131,22 @@ def build_drive():
     except Exception:
         return None
 
-GDRIVE_FOLDER_ID = st.secrets.get("GDRIVE_FOLDER_ID")
-drive = build_drive() if GDRIVE_FOLDER_ID else None
-DRIVE_ENABLED = bool(drive and GDRIVE_FOLDER_ID)
+def get_drive_client():
+    if "drive_client" in st.session_state:
+        return st.session_state["drive_client"]
+    client = _build_drive_client() if GDRIVE_FOLDER_ID else None
+    st.session_state["drive_client"] = client
+    return client
+
+def drive_enabled() -> bool:
+    return bool(GDRIVE_FOLDER_ID and get_drive_client())
 
 # ─────────────────────────────────────────────────────────────
 # Drive helpers
 # ─────────────────────────────────────────────────────────────
 def list_children(folder_id: str, max_items: int = 2000) -> List[Dict[str, Any]]:
+    drive = get_drive_client()
+    if not drive: return []
     items, token = [], None
     while True:
         page_size = min(100, max_items - len(items))
@@ -106,6 +165,7 @@ def list_children(folder_id: str, max_items: int = 2000) -> List[Dict[str, Any]]
     return items
 
 def download_to(path: Path, file_id: str) -> Path:
+    drive = get_drive_client()
     from googleapiclient.http import MediaIoBaseDownload
     path.parent.mkdir(parents=True, exist_ok=True)
     req = drive.files().get_media(fileId=file_id)
@@ -331,7 +391,7 @@ def build_master_index_by_snapshot_date(root_folder_id: str) -> pd.DataFrame:
         if not snap_date: continue
         chunk_dirs = _find_chunk_dirs(snap_id)
 
-        # KN
+        # KN master
         kn_meta = _find_master_anywhere(snap_id, "KN")
         if kn_meta:
             kn_csv = ensure_csv_cached(kn_meta, subdir=f"snap_{snap_id}/koreronet")
@@ -344,22 +404,16 @@ def build_master_index_by_snapshot_date(root_folder_id: str) -> pd.DataFrame:
                     lab   = str(r.get("Label","Unknown"))
                     conf  = float(r.get("Confidence", np.nan))
                     rows.append({
-                        "Date": snap_date,
-                        "Kind": "KN",
-                        "Label": lab,
-                        "Confidence": conf,
-                        "Start": start,
-                        "End": end,
-                        "WavBase": wav,
+                        "Date": snap_date, "Kind": "KN", "Label": lab, "Confidence": conf,
+                        "Start": start, "End": end, "WavBase": wav,
                         "ChunkName": _compose_chunk_name("kn", wav, start, end, lab, conf),
                         "ChunkDriveFolderId": chunk_dirs["KN"],
-                        "SnapId": snap_id,
-                        "SnapName": snap_name,
+                        "SnapId": snap_id, "SnapName": snap_name,
                     })
             except Exception:
                 pass
 
-        # BN
+        # BN master
         bn_meta = _find_master_anywhere(snap_id, "BN")
         if bn_meta:
             bn_csv = ensure_csv_cached(bn_meta, subdir=f"snap_{snap_id}/birdnet")
@@ -372,17 +426,11 @@ def build_master_index_by_snapshot_date(root_folder_id: str) -> pd.DataFrame:
                     lab   = str(r.get("Common name", r.get("Label","Unknown")))
                     conf  = float(r.get("Confidence", np.nan))
                     rows.append({
-                        "Date": snap_date,
-                        "Kind": "BN",
-                        "Label": lab,
-                        "Confidence": conf,
-                        "Start": start,
-                        "End": end,
-                        "WavBase": wav,
+                        "Date": snap_date, "Kind": "BN", "Label": lab, "Confidence": conf,
+                        "Start": start, "End": end, "WavBase": wav,
                         "ChunkName": _compose_chunk_name("bn", wav, start, end, lab, conf),
                         "ChunkDriveFolderId": chunk_dirs["BN"],
-                        "SnapId": snap_id,
-                        "SnapName": snap_name,
+                        "SnapId": snap_id, "SnapName": snap_name,
                     })
             except Exception:
                 pass
@@ -408,17 +456,17 @@ tab1, tab_verify, tab3 = st.tabs(["📊 Detections", "🎧 Verify recordings", "
 with tab1:
     center = st.empty()
     with center.container():
-        st.markdown('<div class="center-wrap fade"><div>🔎 Checking root CSVs…</div></div>', unsafe_allow_html=True)
+        st.markdown('<div class="center-wrap fade-enter"><div>🔎 Checking root CSVs…</div></div>', unsafe_allow_html=True)
 
-    if DRIVE_ENABLED:
+    if drive_enabled():
         bn_meta, kn_meta = list_csvs_drive_root(GDRIVE_FOLDER_ID)
     else:
         bn_meta, kn_meta = [], []
 
-    if DRIVE_ENABLED and (bn_meta or kn_meta):
+    if drive_enabled() and (bn_meta or kn_meta):
         center.empty(); center = st.empty()
         with center.container():
-            st.markdown('<div class="center-wrap fade"><div>⬇️ Downloading root CSVs…</div></div>', unsafe_allow_html=True)
+            st.markdown('<div class="center-wrap"><div>⬇️ Downloading root CSVs…</div></div>', unsafe_allow_html=True)
         bn_paths = [ensure_csv_cached(m, subdir="root/bn") for m in bn_meta]
         kn_paths = [ensure_csv_cached(m, subdir="root/kn") for m in kn_meta]
     else:
@@ -428,7 +476,7 @@ with tab1:
 
     center.empty(); center = st.empty()
     with center.container():
-        st.markdown('<div class="center-wrap fade"><div>🧮 Building date index…</div></div>', unsafe_allow_html=True)
+        st.markdown('<div class="center-wrap"><div>🧮 Building date index…</div></div>', unsafe_allow_html=True)
 
     bn_by_date = build_date_index(bn_paths) if bn_paths else {}
     kn_by_date = build_date_index(kn_paths) if kn_paths else {}
@@ -480,12 +528,12 @@ with tab1:
 # TAB 2 — Verify (snapshot date)
 # ================================
 with tab_verify:
-    if not DRIVE_ENABLED:
+    if not drive_enabled():
         st.error("Google Drive is not configured in secrets."); st.stop()
 
     center2 = st.empty()
     with center2.container():
-        st.markdown('<div class="center-wrap fade"><div>📚 Indexing master CSVs by snapshot date…</div></div>', unsafe_allow_html=True)
+        st.markdown('<div class="center-wrap fade-enter"><div>📚 Indexing master CSVs by snapshot date…</div></div>', unsafe_allow_html=True)
     master = build_master_index_by_snapshot_date(GDRIVE_FOLDER_ID)
     center2.empty()
 
@@ -574,10 +622,17 @@ with tab_verify:
 # =====================
 with tab3:
     st.subheader("Node Power History")
-    if not DRIVE_ENABLED:
+    if not drive_enabled():
         st.error("Google Drive is not configured in secrets."); st.stop()
 
     # Locate 'Power logs' under the Drive root
+    def find_subfolder_by_name(root_id: str, name_ci: str) -> Optional[Dict[str, Any]]:
+        kids = list_children(root_id, max_items=2000)
+        for k in kids:
+            if k.get("mimeType")=="application/vnd.google-apps.folder" and k.get("name","").lower()==name_ci.lower():
+                return k
+        return None
+
     logs_folder = find_subfolder_by_name(GDRIVE_FOLDER_ID, "Power logs")
     if not logs_folder:
         st.warning("Could not find 'Power logs' folder under the Drive root.")
@@ -637,7 +692,6 @@ with tab3:
         if head_dt is None:
             return None
 
-        # Arrays
         wh_line   = next((l for l in lines if l.upper().startswith("PH_WH")),   "")
         mah_line  = next((l for l in lines if l.upper().startswith("PH_MAH")),  "")
         soci_line = next((l for l in lines if l.upper().startswith("PH_SOCI")), "")
@@ -685,9 +739,9 @@ with tab3:
 
     cols = st.columns([2,1])
     with cols[0]:
-        lookback = st.number_input("How many latest logs to stitch", min_value=3, max_value=50, value=7, step=1)
+        lookback = st.number_input("How many latest logs to stitch", min_value=3, max_value=50, value=7, step=1, key="tab3_lookback")
     with cols[1]:
-        pass  # no toggles requested
+        pass
 
     if st.button("Show results", type="primary", key="tab3_show_btn"):
         with st.spinner("Building power time-series…"):
