@@ -1,11 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# KōreroNET Dashboard (landing overlay button + Drive)
+# KōreroNET Dashboard (with splash + Drive)
 # ------------------------------------------------------------
-# Landing overlay:
-#  - KN-only headline over last 48h (no dates). Lowercase "listening".
-#  - Mentions Node 0, appends "No possum detected." if none found.
-#  - Visible Streamlit button -> fade -> render original tabs (unchanged).
+# - Splash screen (“KōreroNET” + “AUT”) for ~2s, then main UI
+# - Node Select at top (single option: Auckland-Orākei)
+# - Tab 1: Root CSV heatmaps (Drive or local) with calendar + min confidence
+# - Tab 2: Verify using snapshot date (Backup/YYYYMMDD_HHMMSS) and master CSVs;
+#          on-demand audio chunk fetch from Drive (no full directory downloads).
+# - Tab 3: Power graph from "Power logs" (Drive), stitches latest N logs;
+#          dual y-axes: SoC_i (%) and Wh.
+#
+# Streamlit secrets required:
+#   GDRIVE_FOLDER_ID = "your_root_folder_id"
+#   [service_account]
+#   type = "service_account"
+#   project_id = "..."
+#   private_key_id = "..."
+#   private_key = (paste PEM with real newlines, no \n escapes)
+#   client_email = "...@...iam.gserviceaccount.com"
+#   client_id = "..."
+#   auth_uri = "https://accounts.google.com/o/oauth2/auth"
+#   token_uri = "https://oauth2.googleapis.com/token"
+#   auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
+#   client_x509_cert_url = "https://www.googleapis.com/robot/v1/metadata/x509/...."
+#   universe_domain = "googleapis.com"
 # ------------------------------------------------------------
 
 import os, io, re, glob, json, time
@@ -20,62 +38,49 @@ import plotly.graph_objects as go
 import streamlit as st
 
 # ─────────────────────────────────────────────────────────────
-# Page style + hero (replace this whole section)
+# Page style
 # ─────────────────────────────────────────────────────────────
 st.set_page_config(page_title="KōreroNET Dashboard", layout="wide")
-
-# fallback text if headline isn't computed yet
-headline_text = st.session_state.get(
-    "headline",
-    st.session_state.get("gate_headline", "Scanning the last 48 hours on Node 0…"
-
 st.markdown("""
 <style>
-:root { color-scheme: dark; }
-.block-container { padding-top:.5rem; padding-bottom:.5rem; }
-
-/* Center the Streamlit button and make it bold/pill */
-div.stButton { display:flex; justify-content:center; margin-top:.75rem; }
-div.stButton > button[kind="primary"] { padding:.8rem 1.4rem; font-weight:700; border-radius:999px; }
-
-/* HERO */
-.hero-wrap{
-  display:grid; align-content:start; justify-items:center; gap:.25rem;
-  margin:.5rem auto 0; padding:1rem 1.25rem 1.25rem; max-width:1100px;
-  border-radius:24px;
-  background: radial-gradient(1000px 500px at 50% -10%, #1a1a1a 0%, #0b0b0b 60%, #070707 100%);
-}
-/* ensure no inherited tall min-height sneaks in */
-.hero-wrap .center-wrap{ min-height:0 !important; }
-
-.logos{ display:flex; gap:.6rem; align-items:center; justify-content:center; margin:.1rem 0 .25rem 0; }
-.logo-pill{ font-weight:800; font-size:1.02rem; letter-spacing:.06em; border:1px solid #3a3a3a; border-radius:999px; padding:.3rem .65rem; }
-
-.hero-h1{ font-size:clamp(38px,6vw,78px); margin:.05rem 0 .45rem 0; font-weight:900; letter-spacing:.01em; }
-.hero-p{ font-size:clamp(16px,2.1vw,22px); opacity:.95; line-height:1.35; max-width:1000px; margin:0 auto; }
-
-/* compact on very small screens */
-@media (max-width: 520px){
-  .hero-wrap{ padding:.9rem 1rem 1rem; border-radius:18px; }
-  .logo-pill{ font-size:.95rem; }
-}
+.block-container {padding-top:1rem; padding-bottom:1rem;}
+.center-wrap {display:flex; align-items:center; justify-content:center; min-height:65vh; text-align:center;}
+.brand-title {font-size: clamp(48px, 8vw, 96px); font-weight: 800; letter-spacing: .02em;}
+.brand-sub {font-size: clamp(28px, 4vw, 48px); font-weight: 600; opacity:.9; margin-top:.4rem;}
+.fade-enter {animation: fadeIn 400ms ease forwards;}
+.fade-exit  {animation: fadeOut 400ms ease forwards;}
+@keyframes fadeIn { from {opacity:0} to {opacity:1} }
+@keyframes fadeOut { from {opacity:1} to {opacity:0} }
+.pulse {position:relative; width:14px; height:14px; margin:18px auto 0; border-radius:50%; background:#16a34a; box-shadow:0 0 0 rgba(22,163,74,.7); animation: pulse 1.6s infinite;}
+@keyframes pulse { 0%{ box-shadow:0 0 0 0 rgba(22,163,74,.7);} 70%{ box-shadow:0 0 0 22px rgba(22,163,74,0);} 100%{ box-shadow:0 0 0 0 rgba(22,163,74,0);} }
+.stTabs [role="tablist"] {gap:.5rem;}
+.stTabs [role="tab"] {padding:.6rem 1rem; border-radius:999px; border:1px solid #3a3a3a;}
+.small {font-size:0.9rem; opacity:0.85;}
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown(f"""
-<div class="hero-wrap">
-  <div class="logos">
-    <span class="logo-pill">KōreroNET</span>
-    <span class="logo-pill">AUT</span>
-    <span class="logo-pill">GeoEnviroSense</span>
-  </div>
-  <h1 class="hero-h1">listening to nature</h1>
-  <p class="hero-p">{headline}</p>
-</div>
-""", unsafe_allow_html=True)
-
-enter = st.button("Enter dashboard", type="primary", key="gate_enter_btn")
-
+# ─────────────────────────────────────────────────────────────
+# Simple splash gate
+# ─────────────────────────────────────────────────────────────
+if "splash_done" not in st.session_state:
+    placeholder = st.empty()
+    with placeholder.container():
+        st.markdown(
+            """
+            <div class="center-wrap fade-enter">
+              <div>
+                <div class="brand-title">KōreroNET</div>
+                <div class="brand-sub">AUT</div>
+                <div class="pulse"></div>
+                <div class="small" style="margin-top:10px;">initialising…</div>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    time.sleep(2.0)
+    st.session_state["splash_done"] = True
+    st.rerun()
 
 # ─────────────────────────────────────────────────────────────
 # Caches & local fallback
@@ -89,6 +94,9 @@ for _p in (CSV_CACHE, CHUNK_CACHE, POWER_CACHE):
 
 DEFAULT_ROOT = r"G:\My Drive\From the node"
 ROOT_LOCAL   = os.getenv("KORERONET_DATA_ROOT", DEFAULT_ROOT)
+
+# Node Select (top bar)
+node = st.selectbox("Node Select", ["Auckland-Orākei"], index=0, key="node_select_top")
 
 # ─────────────────────────────────────────────────────────────
 # Secrets / Drive builders
@@ -193,131 +201,6 @@ def find_subfolder_by_name(root_id: str, name_ci: str) -> Optional[Dict[str, Any
         if k.get("mimeType")=="application/vnd.google-apps.folder" and k.get("name","").lower()==name_ci.lower():
             return k
     return None
-
-# ─────────────────────────────────────────────────────────────
-# LANDING OVERLAY (Streamlit button; no JS)
-# ─────────────────────────────────────────────────────────────
-@st.cache_data(show_spinner=False)
-def _ol_list_kn_csvs_local(root: str) -> List[str]:
-    return sorted(glob.glob(os.path.join(root, "kn*.csv")))
-
-@st.cache_data(show_spinner=False)
-def _ol_list_kn_csvs_drive_root(folder_id: str) -> List[Dict[str, Any]]:
-    kids = list_children(folder_id, max_items=2000)
-    kn = [k for k in kids if k.get("name","").lower().startswith("kn") and k.get("name","").lower().endswith(".csv")]
-    kn.sort(key=lambda m: m.get("name",""))
-    return kn
-
-def _ol_std_kn(chunk: pd.DataFrame) -> pd.DataFrame:
-    c = chunk.copy()
-    conf_col = next((col for col in c.columns if col.lower()=="confidence"), None)
-    c["Confidence"] = pd.to_numeric(c[conf_col], errors="coerce") if conf_col else np.nan
-    label_col = next((col for col in c.columns if col.lower() in ("label","common name","common_name","species","class")), None)
-    c["Label"] = c[label_col].astype(str) if label_col else "Unknown"
-    at_col = next((col for col in c.columns if col.lower()=="actualtime"), None)
-    c["ActualTime"] = pd.to_datetime(c[at_col], errors="coerce", dayfirst=True) if at_col else pd.NaT
-    c = c.dropna(subset=["ActualTime","Label"])
-    return c[["Label","Confidence","ActualTime"]]
-
-@st.cache_data(show_spinner=True, ttl=600)
-def _ol_top_kn_48h(kn_paths: List[str|Path], conf_thresh: float = 0.95, lookback_hours: int = 48) -> Dict[str, Any]:
-    now = pd.Timestamp.now()
-    since = now - pd.Timedelta(hours=lookback_hours)
-    counts: Dict[str,int] = {}
-    n_rows = 0
-    possum_count = 0
-    for p in kn_paths:
-        try:
-            for chunk in pd.read_csv(str(p), chunksize=5000):
-                std = _ol_std_kn(chunk)
-                if std.empty: continue
-                m = (std["ActualTime"] >= since) & (std["ActualTime"] <= now)
-                m &= (pd.to_numeric(std["Confidence"], errors="coerce") >= conf_thresh)
-                filt = std.loc[m, ["Label"]]
-                if filt.empty: continue
-                vc = filt["Label"].value_counts()
-                n_rows += int(vc.sum())
-                for label, n in vc.items():
-                    if not label or str(label).lower() == "unknown":
-                        continue
-                    counts[label] = counts.get(label, 0) + int(n)
-                    if "possum" in str(label).lower():
-                        possum_count += int(n)
-        except Exception:
-            continue
-    labels = [k for k,_ in sorted(counts.items(), key=lambda kv: kv[1], reverse=True)]
-    return {"top3": labels[:3], "n": n_rows, "possum": possum_count}
-
-def _ol_join(items: List[str]) -> str:
-    items = [s for s in items if s and s.strip()]
-    if not items: return ""
-    if len(items) == 1: return items[0]
-    if len(items) == 2: return f"{items[0]} and {items[1]}"
-    return ", ".join(items[:-1]) + f", and {items[-1]}"
-
-def _ol_sentence(res: Dict[str,Any]) -> str:
-    if not res or res.get("n", 0) == 0 or not res.get("top3"):
-        base = "In the last 48 hours, not enough detections to summarise dominant singers in the Auckland-Orākei region. We also detected many more on Node 0."
-    else:
-        base = f"In the last 48 hours, {_ol_join(res['top3'])} were the dominant birds singing in the Auckland-Orākei region. We also detected many more on Node 0."
-    if int(res.get("possum", 0)) == 0:
-        base += " No possum detected."
-    return base
-
-def run_landing_overlay():
-    if st.session_state.get("gate_open", False):
-        return
-
-    # Build KN paths
-    if drive_enabled():
-        kn_meta = _ol_list_kn_csvs_drive_root(GDRIVE_FOLDER_ID)
-        kn_paths = [ensure_csv_cached(m, subdir="root/kn") for m in kn_meta]
-    else:
-        kn_paths = [Path(p) for p in _ol_list_kn_csvs_local(ROOT_LOCAL)]
-
-    # Compute headline
-    res = _ol_top_kn_48h(kn_paths, conf_thresh=0.95, lookback_hours=48)
-    headline = _ol_sentence(res)
-
-    # Render the landing section with a real Streamlit button
-    with st.container():
-        st.markdown('<div class="hero-bg fade-enter">', unsafe_allow_html=True)
-        st.markdown(
-            """
-            <div class="logos">
-              <div class="logo-pill">KōreroNET</div>
-              <div class="logo-pill">AUT</div>
-              <div class="logo-pill">GeoEnviroSense</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        st.markdown('<div class="center-wrap"><div>', unsafe_allow_html=True)
-        st.markdown('<div class="hero-h1">listening to nature</div>', unsafe_allow_html=True)
-        st.markdown(f'<p class="hero-p">{headline}</p>', unsafe_allow_html=True)
-        st.markdown('</div></div>', unsafe_allow_html=True)
-        st.markdown('<div class="hero-cta">', unsafe_allow_html=True)
-        enter = st.button("Enter dashboard", type="primary", key="gate_enter_btn")
-        st.markdown('</div></div>', unsafe_allow_html=True)
-
-    if enter:
-        # brief fade then open
-        ph = st.empty()
-        with ph.container():
-            st.markdown('<div class="full-fade fade-exit"></div>', unsafe_allow_html=True)
-        time.sleep(0.35)
-        st.session_state["gate_open"] = True
-        st.rerun()
-    else:
-        st.stop()
-
-# Run overlay BEFORE rendering the rest of the app
-run_landing_overlay()
-
-# ─────────────────────────────────────────────────────────────
-# Node Select (top bar)
-# ─────────────────────────────────────────────────────────────
-node = st.selectbox("Node Select", ["Auckland-Orākei"], index=0, key="node_select_top")
 
 # ─────────────────────────────────────────────────────────────
 # Tab 1 (root CSV heatmap)
@@ -675,21 +558,6 @@ with tab_verify:
         st.info("No rows above the selected confidence."); st.stop()
 
     avail_days = sorted(pool["Date"].unique())
-    def calendar_pick(available_days: List[date], label: str, help_txt: str = "") -> date:
-        available_days = sorted(available_days)
-        d_min, d_max = available_days[0], available_days[-1]
-        d_val = st.date_input(label, value=d_max, min_value=d_min, max_value=d_max, help=help_txt)
-        if d_val not in set(available_days):
-            earlier = [x for x in available_days if x <= d_val]
-            if earlier:
-                d_val = earlier[-1]
-                st.info(f"No data on chosen date; showing {d_val.isoformat()} (nearest earlier).")
-            else:
-                later = [x for x in available_days if x >= d_val]
-                d_val = later[0]
-                st.info(f"No data on chosen date; showing {d_val.isoformat()} (nearest later).")
-        return d_val
-
     day_pick = calendar_pick(list(avail_days), "Day", "Dates come from snapshot folder names under Backup/.")
 
     day_df = pool[pool["Date"] == day_pick]
@@ -883,8 +751,14 @@ with tab3:
             st.warning("No parsable power logs found.")
         else:
             fig = go.Figure()
-            fig.add_trace(go.Scatter(x=ts["t"], y=ts["PH_SoCi"], mode="lines", name="SoC_i (%)", yaxis="y1"))
-            fig.add_trace(go.Scatter(x=ts["t"], y=ts["PH_WH"],   mode="lines", name="Energy (Wh)", yaxis="y2"))
+            # SoC_i (%) on y1
+            fig.add_trace(go.Scatter(
+                x=ts["t"], y=ts["PH_SoCi"], mode="lines", name="SoC_i (%)", yaxis="y1"
+            ))
+            # Wh on y2
+            fig.add_trace(go.Scatter(
+                x=ts["t"], y=ts["PH_WH"], mode="lines", name="Energy (Wh)", yaxis="y2"
+            ))
 
             fig.update_layout(
                 title="Power / State of Charge over time",
@@ -896,6 +770,7 @@ with tab3:
             )
             st.plotly_chart(fig, use_container_width=True)
 
+            # Quick last-point indicators
             last = ts.iloc[-1]
             c1, c2 = st.columns(2)
             with c1: st.metric("Last SoC_i (%)", f"{last['PH_SoCi']:.1f}")
