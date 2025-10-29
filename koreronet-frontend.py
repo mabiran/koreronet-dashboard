@@ -7,11 +7,6 @@ KōreroNET Dashboard — Google Drive backed, with visible progress + throttling
 - Tab 1: heatmaps from bn*/kn* CSVs at the root of Folder ID (downloads on demand).
 - Tab 2: verify snapshots under Backup/YYYYMMDD_HHMMSS/{koreronet,birdnet} (progress shown).
 - Tab 3: Drive browser and cache controls.
-
-Key fixes:
-- No hidden bulk downloads: all Drive downloads happen inside progress loops.
-- Caps (Max CSVs per source) to avoid long first runs.
-- “List only (no download)” option to see counts immediately.
 """
 
 import os, io, glob, re, json, shutil
@@ -90,7 +85,7 @@ def list_children(folder_id: str, max_items: int = 2000) -> List[Dict[str, Any]]
             orderBy="folder,name_natural",
             includeItemsFromAllDrives=True,
             supportsAllDrives=True,
-            corpora="user",
+            corpora="allDrives",
         ).execute()
         items.extend(resp.get("files", []))
         token = resp.get("nextPageToken")
@@ -126,7 +121,6 @@ def ensure_chunk_cached(chunk_name: str, folder_id: str, subdir: str) -> Optiona
     local_path = (CHUNK_CACHE / subdir / chunk_name)
     if local_path.exists():
         return local_path
-    # find by name within folder
     for k in list_children(folder_id, max_items=2000):
         if k.get("name") == chunk_name:
             try:
@@ -148,7 +142,6 @@ def list_csvs_drive(folder_id: str) -> Tuple[List[Dict[str, Any]], List[Dict[str
     kids = list_children(folder_id, max_items=2000)
     bn = [k for k in kids if k.get("name","").lower().startswith("bn") and k.get("name","").lower().endswith(".csv")]
     kn = [k for k in kids if k.get("name","").lower().startswith("kn") and k.get("name","").lower().endswith(".csv")]
-    # return metadata (no download yet)
     bn.sort(key=lambda m: m.get("name",""))
     kn.sort(key=lambda m: m.get("name",""))
     return bn, kn
@@ -291,7 +284,7 @@ tab1, tab_verify, tab3 = st.tabs(["📊 Detections", "🎧 Verify recordings", "
 # ===== TAB 1 =====
 with tab1:
     st.caption("Uses CSVs at the **root** of your Google Drive Folder ID (bn*.csv / kn*.csv).")
-    max_root_csv = st.slider("Max CSVs per source (root)", 10, 1000, 200, 10, help="Caps how many BN/KN CSVs we pull from Drive to index.")
+    max_root_csv = st.slider("Max CSVs per source (root)", 10, 1000, 200, 10)
     if DRIVE_ENABLED:
         with st.status("Listing root CSVs…", expanded=False) as s:
             bn_meta, kn_meta = list_csvs_drive(GDRIVE_FOLDER_ID)
@@ -301,7 +294,6 @@ with tab1:
         bn_meta = bn_meta[:max_root_csv]
         kn_meta = kn_meta[:max_root_csv]
         st.write(f"Indexing up to BN={len(bn_meta)}, KN={len(kn_meta)}")
-        # Download with progress and build index
         st.subheader("Indexing dates")
         with st.expander("Download progress (root CSVs)", expanded=True):
             bn_paths = _download_and_return_paths(bn_meta, "BN", subdir="root/bn") if bn_meta else []
@@ -371,9 +363,8 @@ with tab1:
 # ===== TAB 2 =====
 with tab_verify:
     st.subheader("Verify recordings (snapshots in Backup/…)")
-    list_only = st.checkbox("List only (no download)", value=False, help="Quickly list CSV counts without downloading them.")
+    list_only = st.checkbox("List only (no download)", value=False)
     max_csv_per_src = st.slider("Max CSVs per source (snapshot)", 10, 2000, 300, 10)
-    st.caption("Tip: start small (e.g., 100) to confirm everything works, then increase.")
     colc1, colc2 = st.columns(2)
     with colc1:
         if st.button("Clear CSV cache"):
@@ -437,7 +428,8 @@ with tab_verify:
         if list_only:
             st.info(f"(List only) Local CSVs found: {len(csv_list)}"); return pd.DataFrame()
         prog = st.progress(0.0); status = st.empty()
-        frames; frames = []; n = max(1, len(csv_list))
+        frames = []  # <<< FIXED
+        n = max(1, len(csv_list))
         for i, (kind, path) in enumerate(csv_list, 1):
             status.text(f"Parsing {i}/{n}: {os.path.basename(path)}")
             try:
@@ -469,11 +461,11 @@ with tab_verify:
         if list_only:
             st.info(f"(List only) Drive CSVs found: {len(csv_list)}"); return pd.DataFrame()
         prog = st.progress(0.0); status = st.empty()
-        frames; frames = []; n = max(1, len(csv_list))
+        frames = []  # <<< FIXED
+        n = max(1, len(csv_list))
         for i, (kind, meta, chunk_folder_id) in enumerate(csv_list, 1):
             status.text(f"Downloading & parsing {i}/{n}: {meta.get('name')}")
             try:
-                # download this CSV now (visible progress over loop)
                 subdir = f"snap_{snap_id}/{ 'koreronet' if kind=='kn' else 'birdnet'}"
                 csv_path = ensure_csv_cached_by_meta(meta, subdir=subdir)
                 df = pd.read_csv(str(csv_path), sep=None, engine="python")
@@ -490,7 +482,6 @@ with tab_verify:
                     "det_start":  pd.to_numeric(col("det_start"), errors="coerce") if kind=="bn" else np.nan,
                     "Kind":       kind.upper(),
                 })
-                # In Drive mode, lazy fetch audio later:
                 out["ChunkName"] = out["chunk_file"].apply(lambda f: os.path.basename(f) if isinstance(f, str) else "")
                 out["ChunkDriveFolderId"] = chunk_folder_id
                 out["ChunkPath"] = ""
@@ -516,7 +507,6 @@ with tab_verify:
             st.info("List-only mode: no detections loaded. Disable to parse files.")
         else:
             std_v = raw
-            # Convert to standard verify frame with ActualTime
             def _actual_time(src_name: str, offset_seconds: float):
                 m = re.match(r"^(\d{8})_(\d{6})", os.path.basename(str(src_name)))
                 if not m: return pd.NaT
@@ -542,7 +532,6 @@ with tab_verify:
                 std_v = std_v[std_v["Confidence"] >= float(min_conf_v)]
             st.session_state["v_df"] = std_v
             st.session_state["v_loaded"] = True
-            # reset indices
             for k in list(st.session_state.keys()):
                 if isinstance(k, str) and k.startswith("v_idx::"):
                     del st.session_state[k]
