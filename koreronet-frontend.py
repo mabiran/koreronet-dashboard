@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# KōreroNET Dashboard (with overlay + Drive)
+# KōreroNET Dashboard (landing overlay button + Drive)
 # ------------------------------------------------------------
-# Adds a landing overlay (KōreroNET + AUT + GeoEnviroSense) that:
-#  - Computes a KN-only headline for last 48h (no dates, minimal text).
-#  - Shows a button and click/touch-anywhere to proceed.
-#  - Fades out, then renders the original app unchanged.
+# Landing overlay:
+#  - KN-only headline over last 48h (no dates). Lowercase "listening".
+#  - Mentions Node 0, appends "No possum detected." if none found.
+#  - Visible Streamlit button -> fade -> render original tabs (unchanged).
 # ------------------------------------------------------------
 
 import os, io, re, glob, json, time
@@ -30,7 +30,7 @@ st.markdown("""
 .brand-title {font-size: clamp(48px, 8vw, 96px); font-weight: 800; letter-spacing: .02em;}
 .brand-sub {font-size: clamp(28px, 4vw, 48px); font-weight: 600; opacity:.9; margin-top:.4rem;}
 .fade-enter {animation: fadeIn 400ms ease forwards;}
-.fade-exit  {animation: fadeOut 400ms ease forwards;}
+.fade-exit  {animation: fadeOut 350ms ease forwards;}
 @keyframes fadeIn { from {opacity:0} to {opacity:1} }
 @keyframes fadeOut { from {opacity:1} to {opacity:0} }
 .pulse {position:relative; width:14px; height:14px; margin:18px auto 0; border-radius:50%; background:#16a34a; box-shadow:0 0 0 rgba(22,163,74,.7); animation: pulse 1.6s infinite;}
@@ -39,18 +39,21 @@ st.markdown("""
 .stTabs [role="tab"] {padding:.6rem 1rem; border-radius:999px; border:1px solid #3a3a3a;}
 .small {font-size:0.9rem; opacity:0.85;}
 
-/* Overlay */
-.overlay {
-  position: fixed; inset: 0;
+/* Nice top gradient for the landing area only */
+.hero-bg {
   background: radial-gradient(1000px 500px at 50% -10%, #1a1a1a 0%, #0b0b0b 60%, #070707 100%);
-  color: #fafafa; z-index: 9999; display:flex; align-items:center; justify-content:center;
+  border-radius: 24px;
+  padding: 2rem 1rem;
 }
-.overlay-inner {max-width: 1000px; padding: 2rem; text-align:center;}
-.overlay h1 {font-size: clamp(40px, 6vw, 80px); margin: 0 0 .2rem 0; font-weight: 900; letter-spacing: .01em;}
-.overlay p {font-size: clamp(16px, 2.2vw, 22px); opacity: .95; line-height: 1.35;}
-.overlay .cta {margin-top: 1.3rem;}
-.overlay .logos {display:flex; gap:.75rem; align-items:center; justify-content:center; margin-bottom: .8rem;}
+.logos {display:flex; gap:.75rem; align-items:center; justify-content:center; margin-bottom: .8rem;}
 .logo-pill {font-weight:800; font-size:1.05rem; letter-spacing:.06em; border:1px solid #3a3a3a; border-radius:999px; padding:.35rem .7rem;}
+.hero-h1 {font-size: clamp(40px, 6vw, 80px); margin: .2rem 0 .6rem 0; font-weight: 900; letter-spacing: .01em;}
+.hero-p  {font-size: clamp(16px, 2.2vw, 22px); opacity: .95; line-height: 1.35; max-width: 1000px; margin: 0 auto;}
+.hero-cta {margin-top: 1.3rem;}
+/* Make the Streamlit button look prominent */
+div.stButton > button[kind="primary"] {padding: .7rem 1.2rem; font-weight: 700; border-radius: 999px;}
+/* Temporary full-screen fade layer used only after clicking */
+.full-fade {position:fixed; inset:0; background:#000; opacity:1;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -111,7 +114,7 @@ def drive_enabled() -> bool:
     return bool(GDRIVE_FOLDER_ID and get_drive_client())
 
 # ─────────────────────────────────────────────────────────────
-# Drive helpers (original)
+# Drive helpers
 # ─────────────────────────────────────────────────────────────
 def list_children(folder_id: str, max_items: int = 2000) -> List[Dict[str, Any]]:
     drive = get_drive_client()
@@ -172,11 +175,8 @@ def find_subfolder_by_name(root_id: str, name_ci: str) -> Optional[Dict[str, Any
     return None
 
 # ─────────────────────────────────────────────────────────────
-# OVERLAY: KN-only last-48h headline + button/click-to-enter
-# (Does NOT modify tabs/panels. Runs before rendering the app.)
+# LANDING OVERLAY (Streamlit button; no JS)
 # ─────────────────────────────────────────────────────────────
-
-# Helpers for KN CSV discovery/standardization (overlay-only)
 @st.cache_data(show_spinner=False)
 def _ol_list_kn_csvs_local(root: str) -> List[str]:
     return sorted(glob.glob(os.path.join(root, "kn*.csv")))
@@ -244,103 +244,63 @@ def _ol_sentence(res: Dict[str,Any]) -> str:
         base += " No possum detected."
     return base
 
-# Query param helpers (for click-anywhere close)
-def _qp_get():
-    try:
-        return dict(st.query_params)
-    except Exception:
-        return {k: v[0] if isinstance(v, list) and v else v for k, v in st.experimental_get_query_params().items()}
-
-def _qp_set(**kwargs):
-    try:
-        st.query_params.clear()
-        for k, v in kwargs.items():
-            st.query_params[k] = v
-    except Exception:
-        st.experimental_set_query_params(**kwargs)
-
-# If ?go=1 present, open the gate immediately
-_qp = _qp_get()
-if _qp.get("go") == "1":
-    st.session_state["gate_open"] = True
-    _qp_set()  # clean URL
-
-def _render_overlay(msg: str):
-    st.markdown(
-        f"""
-        <div class="overlay fade-enter" id="gate">
-          <div class="overlay-inner">
-            <div class="logos">
-              <div class="logo-pill">KōreroNET</div>
-              <div class="logo-pill">AUT</div>
-              <div class="logo-pill">GeoEnviroSense</div>
-            </div>
-            <h1>listening to nature</h1>
-            <p>{msg}</p>
-            <div class="cta">
-        """,
-        unsafe_allow_html=True,
-    )
-    clicked = st.button("Enter dashboard", type="primary", key="gate_enter_btn")
-    st.markdown("</div></div></div>", unsafe_allow_html=True)
-
-    # Click/touch ANYWHERE also proceeds (sets ?go=1 and reloads)
-    st.markdown("""
-    <script>
-    (function(){
-      const gate = document.getElementById('gate');
-      if(!gate) return;
-      function closeGate(){
-        try {
-          const url = new URL(window.location.href);
-          url.searchParams.set('go','1');
-          window.location.href = url.toString();
-        } catch(e){
-          window.location.search='?go=1';
-        }
-      }
-      gate.addEventListener('click', closeGate, {passive:true});
-      gate.addEventListener('touchstart', closeGate, {passive:true});
-    })();
-    </script>
-    """, unsafe_allow_html=True)
-
-    return clicked
-
-def run_overlay_gate():
+def run_landing_overlay():
     if st.session_state.get("gate_open", False):
         return
+
     # Build KN paths
     if drive_enabled():
         kn_meta = _ol_list_kn_csvs_drive_root(GDRIVE_FOLDER_ID)
         kn_paths = [ensure_csv_cached(m, subdir="root/kn") for m in kn_meta]
     else:
         kn_paths = [Path(p) for p in _ol_list_kn_csvs_local(ROOT_LOCAL)]
+
     # Compute headline
     res = _ol_top_kn_48h(kn_paths, conf_thresh=0.95, lookback_hours=48)
     headline = _ol_sentence(res)
 
-    # Render overlay; on button click, fade then open app
-    if _render_overlay(headline):
-        fade_ph = st.empty()
-        with fade_ph.container():
-            st.markdown('<div class="overlay fade-exit"></div>', unsafe_allow_html=True)
+    # Render the landing section with a real Streamlit button
+    with st.container():
+        st.markdown('<div class="hero-bg fade-enter">', unsafe_allow_html=True)
+        st.markdown(
+            """
+            <div class="logos">
+              <div class="logo-pill">KōreroNET</div>
+              <div class="logo-pill">AUT</div>
+              <div class="logo-pill">GeoEnviroSense</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.markdown('<div class="center-wrap"><div>', unsafe_allow_html=True)
+        st.markdown('<div class="hero-h1">listening to nature</div>', unsafe_allow_html=True)
+        st.markdown(f'<p class="hero-p">{headline}</p>', unsafe_allow_html=True)
+        st.markdown('</div></div>', unsafe_allow_html=True)
+        st.markdown('<div class="hero-cta">', unsafe_allow_html=True)
+        enter = st.button("Enter dashboard", type="primary", key="gate_enter_btn")
+        st.markdown('</div></div>', unsafe_allow_html=True)
+
+    if enter:
+        # brief fade then open
+        ph = st.empty()
+        with ph.container():
+            st.markdown('<div class="full-fade fade-exit"></div>', unsafe_allow_html=True)
         time.sleep(0.35)
         st.session_state["gate_open"] = True
         st.rerun()
     else:
         st.stop()
 
-# Run overlay gate BEFORE rendering the rest of the app
-run_overlay_gate()
+# Run overlay BEFORE rendering the rest of the app
+run_landing_overlay()
 
 # ─────────────────────────────────────────────────────────────
-# Node Select (top bar) — unchanged behavior, rendered after gate
+# Node Select (top bar)
 # ─────────────────────────────────────────────────────────────
 node = st.selectbox("Node Select", ["Auckland-Orākei"], index=0, key="node_select_top")
 
 # ─────────────────────────────────────────────────────────────
-# Tab 1 (root CSV heatmap) — UNCHANGED
+# Tab 1 (root CSV heatmap)
 # ─────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def list_csvs_local(root: str) -> Tuple[List[str], List[str]]:
@@ -446,7 +406,7 @@ def calendar_pick(available_days: List[date], label: str, help_txt: str = "") ->
     return d_val
 
 # ─────────────────────────────────────────────────────────────
-# Snapshot/master logic for Tab 2 — UNCHANGED
+# Snapshot/master logic for Tab 2
 # ─────────────────────────────────────────────────────────────
 SNAP_RE = re.compile(r"^(\d{8})_(\d{6})$", re.IGNORECASE)
 
@@ -583,7 +543,7 @@ def build_master_index_by_snapshot_date(root_folder_id: str) -> pd.DataFrame:
     return out
 
 # ─────────────────────────────────────────────────────────────
-# Tabs — UNCHANGED
+# Tabs
 # ─────────────────────────────────────────────────────────────
 tab1, tab_verify, tab3 = st.tabs(["📊 Detections", "🎧 Verify recordings", "⚡ Power"])
 
