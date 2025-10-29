@@ -20,26 +20,43 @@ import plotly.graph_objects as go
 import streamlit as st
 
 # ─────────────────────────────────────────────────────────────
-# Page style
+# Page style + hero (replace this whole section)
 # ─────────────────────────────────────────────────────────────
 st.set_page_config(page_title="KōreroNET Dashboard", layout="wide")
+
 st.markdown("""
 <style>
+:root { color-scheme: dark; }
+.block-container { padding-top:.5rem; padding-bottom:.5rem; }
+
+/* Center the Streamlit button and make it bold/pill */
+div.stButton { display:flex; justify-content:center; margin-top:.75rem; }
+div.stButton > button[kind="primary"] { padding:.8rem 1.4rem; font-weight:700; border-radius:999px; }
+
+/* HERO */
 .hero-wrap{
   display:grid; align-content:start; justify-items:center; gap:.25rem;
-  margin:.75rem auto 0; padding:1rem 1rem 1.25rem; max-width:1100px;
+  margin:.5rem auto 0; padding:1rem 1.25rem 1.25rem; max-width:1100px;
   border-radius:24px;
   background: radial-gradient(1000px 500px at 50% -10%, #1a1a1a 0%, #0b0b0b 60%, #070707 100%);
 }
-/* kill any inherited tall min-height from .center-wrap */
+/* ensure no inherited tall min-height sneaks in */
 .hero-wrap .center-wrap{ min-height:0 !important; }
-.logos{ display:flex; gap:.75rem; align-items:center; justify-content:center; margin:.1rem 0 .35rem 0; }
-.logo-pill{ font-weight:800; font-size:1.05rem; letter-spacing:.06em; border:1px solid #3a3a3a; border-radius:999px; padding:.35rem .7rem; }
-.hero-h1{ font-size:clamp(40px,6vw,80px); margin:.1rem 0 .5rem 0; font-weight:900; letter-spacing:.01em; }
-.hero-p{ font-size:clamp(16px,2.2vw,22px); opacity:.95; line-height:1.35; max-width:1000px; margin:0 auto; }
-.hero-cta{ margin-top:1.0rem; }
+
+.logos{ display:flex; gap:.6rem; align-items:center; justify-content:center; margin:.1rem 0 .25rem 0; }
+.logo-pill{ font-weight:800; font-size:1.02rem; letter-spacing:.06em; border:1px solid #3a3a3a; border-radius:999px; padding:.3rem .65rem; }
+
+.hero-h1{ font-size:clamp(38px,6vw,78px); margin:.05rem 0 .45rem 0; font-weight:900; letter-spacing:.01em; }
+.hero-p{ font-size:clamp(16px,2.1vw,22px); opacity:.95; line-height:1.35; max-width:1000px; margin:0 auto; }
+
+/* compact on very small screens */
+@media (max-width: 520px){
+  .hero-wrap{ padding:.9rem 1rem 1rem; border-radius:18px; }
+  .logo-pill{ font-size:.95rem; }
+}
 </style>
 """, unsafe_allow_html=True)
+
 st.markdown(f"""
 <div class="hero-wrap">
   <div class="logos">
@@ -53,6 +70,7 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 enter = st.button("Enter dashboard", type="primary", key="gate_enter_btn")
+
 
 # ─────────────────────────────────────────────────────────────
 # Caches & local fallback
