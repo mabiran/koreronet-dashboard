@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# KōreroNET Dashboard (with splash + Drive)
+# KōreroNET Dashboard (with precompute splash + Drive)
 # ------------------------------------------------------------
-# - Splash screen (“KōreroNET” + “AUT”) for ~2s, then main UI
-# - Node Select at top (single option: Auckland-Orākei)
+# - On landing: dark splash shows KōreroNET + AUT while we compute:
+#     "Past week: Top 3 singing birds (confidence > 0.95, BN+KN combined)"
+#   Then shows the headline. User clicks/taps to fade and enter the app.
 # - Tab 1: Root CSV heatmaps (Drive or local) with calendar + min confidence
-# - Tab 2: Verify using snapshot date (Backup/YYYYMMDD_HHMMSS) and master CSVs;
-#          on-demand audio chunk fetch from Drive (no full directory downloads).
-# - Tab 3: Power graph from "Power logs" (Drive), stitches latest N logs;
-#          dual y-axes: SoC_i (%) and Wh.
+# - Tab 2: Verify using snapshot date; fetch chunks on demand from Drive
+# - Tab 3: Power graph (SoC_i 0–100 on left, Wh on right)
 #
 # Streamlit secrets required:
 #   GDRIVE_FOLDER_ID = "your_root_folder_id"
@@ -43,12 +42,13 @@ import streamlit as st
 st.set_page_config(page_title="KōreroNET Dashboard", layout="wide")
 st.markdown("""
 <style>
+:root { color-scheme: dark; }
 .block-container {padding-top:1rem; padding-bottom:1rem;}
-.center-wrap {display:flex; align-items:center; justify-content:center; min-height:65vh; text-align:center;}
+.center-wrap {display:flex; align-items:center; justify-content:center; min-height:68vh; text-align:center;}
 .brand-title {font-size: clamp(48px, 8vw, 96px); font-weight: 800; letter-spacing: .02em;}
 .brand-sub {font-size: clamp(28px, 4vw, 48px); font-weight: 600; opacity:.9; margin-top:.4rem;}
-.fade-enter {animation: fadeIn 400ms ease forwards;}
-.fade-exit  {animation: fadeOut 400ms ease forwards;}
+.fade-enter {animation: fadeIn 450ms ease forwards;}
+.fade-exit  {animation: fadeOut 450ms ease forwards;}
 @keyframes fadeIn { from {opacity:0} to {opacity:1} }
 @keyframes fadeOut { from {opacity:1} to {opacity:0} }
 .pulse {position:relative; width:14px; height:14px; margin:18px auto 0; border-radius:50%; background:#16a34a; box-shadow:0 0 0 rgba(22,163,74,.7); animation: pulse 1.6s infinite;}
@@ -56,31 +56,21 @@ st.markdown("""
 .stTabs [role="tablist"] {gap:.5rem;}
 .stTabs [role="tab"] {padding:.6rem 1rem; border-radius:999px; border:1px solid #3a3a3a;}
 .small {font-size:0.9rem; opacity:0.85;}
+
+.overlay {
+  position: fixed; inset: 0; background: radial-gradient(1000px 500px at 50% -10%, #1a1a1a 0%, #0b0b0b 60%, #070707 100%);
+  color: #fafafa; z-index: 9999; display:flex; align-items:center; justify-content:center;
+}
+.overlay-inner {max-width: 1000px; padding: 2rem; text-align:center;}
+.overlay h1 {font-size: clamp(40px, 6vw, 80px); margin: 0 0 .2rem 0; font-weight: 900; letter-spacing: .01em;}
+.overlay h2 {font-size: clamp(22px, 3.2vw, 36px); margin: .2rem 0 1.2rem 0; font-weight: 700; opacity:.95;}
+.overlay p {font-size: clamp(16px, 2.2vw, 22px); opacity: .95; line-height: 1.35;}
+.overlay .cta {margin-top: 1.5rem;}
+.overlay .badge {display:inline-block; font-weight:700; font-size:.95rem; padding:.3rem .6rem; border:1px solid #3a3a3a; border-radius:999px; opacity:.9;}
+.overlay .logos {display:flex; gap:1rem; align-items:center; justify-content:center; margin-bottom: .6rem;}
+.logo-pill {font-weight:800; font-size:1.05rem; letter-spacing:.06em; border:1px solid #3a3a3a; border-radius:999px; padding:.35rem .7rem;}
 </style>
 """, unsafe_allow_html=True)
-
-# ─────────────────────────────────────────────────────────────
-# Simple splash gate
-# ─────────────────────────────────────────────────────────────
-if "splash_done" not in st.session_state:
-    placeholder = st.empty()
-    with placeholder.container():
-        st.markdown(
-            """
-            <div class="center-wrap fade-enter">
-              <div>
-                <div class="brand-title">KōreroNET</div>
-                <div class="brand-sub">AUT</div>
-                <div class="pulse"></div>
-                <div class="small" style="margin-top:10px;">initialising…</div>
-              </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    time.sleep(2.0)
-    st.session_state["splash_done"] = True
-    st.rerun()
 
 # ─────────────────────────────────────────────────────────────
 # Caches & local fallback
@@ -94,9 +84,6 @@ for _p in (CSV_CACHE, CHUNK_CACHE, POWER_CACHE):
 
 DEFAULT_ROOT = r"G:\My Drive\From the node"
 ROOT_LOCAL   = os.getenv("KORERONET_DATA_ROOT", DEFAULT_ROOT)
-
-# Node Select (top bar)
-node = st.selectbox("Node Select", ["Auckland-Orākei"], index=0, key="node_select_top")
 
 # ─────────────────────────────────────────────────────────────
 # Secrets / Drive builders
@@ -203,7 +190,7 @@ def find_subfolder_by_name(root_id: str, name_ci: str) -> Optional[Dict[str, Any
     return None
 
 # ─────────────────────────────────────────────────────────────
-# Tab 1 (root CSV heatmap)
+# Tab 1 helpers (root CSVs)
 # ─────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def list_csvs_local(root: str) -> Tuple[List[str], List[str]]:
@@ -245,6 +232,190 @@ def build_date_index(paths: List[Path]) -> Dict[date, List[str]]:
             idx.setdefault(d, []).append(str(p))
     return idx
 
+def _standardize_chunk(chunk: pd.DataFrame, kind: str) -> pd.DataFrame:
+    c = chunk.copy()
+    # Confidence
+    conf_col = "Confidence" if "Confidence" in c.columns else None
+    if conf_col is None:
+        # try case-insensitive
+        for col in c.columns:
+            if col.lower() == "confidence":
+                conf_col = col; break
+    if conf_col is None:
+        c["Confidence"] = np.nan
+    else:
+        c["Confidence"] = pd.to_numeric(c[conf_col], errors="coerce")
+
+    # Label
+    if kind == "bn":
+        # Prefer Common name; attempt fallbacks
+        label_col = None
+        for col in c.columns:
+            low = col.lower()
+            if low in ("common name","common_name","label","species","class"):
+                label_col = col; break
+        if label_col is None:
+            c["Label"] = "Unknown"
+        else:
+            c["Label"] = c[label_col].astype(str)
+    else:
+        label_col = None
+        for col in c.columns:
+            if col.lower() in ("label","common name","common_name","species","class"):
+                label_col = col; break
+        c["Label"] = c[label_col].astype(str) if label_col else "Unknown"
+
+    # Time
+    at_col = None
+    for col in c.columns:
+        if col.lower() == "actualtime":
+            at_col = col; break
+    c["ActualTime"] = pd.to_datetime(c[at_col], errors="coerce", dayfirst=True) if at_col else pd.NaT
+    c = c.dropna(subset=["ActualTime", "Label"])
+    return c[["Label","Confidence","ActualTime"]]
+
+@st.cache_data(show_spinner=True, ttl=600)
+def compute_weekly_top_species(
+    bn_paths: List[str|Path], kn_paths: List[str|Path],
+    conf_thresh: float = 0.95, days: int = 7
+) -> Dict[str, Any]:
+    """Scan last `days` across BN+KN, confidence >= conf_thresh. Return dict with
+       'top3' (list), 'also' (list up to 2), 'since', 'until', 'total_rows'."""
+    since = date.today() - timedelta(days=days-1)
+    until = date.today()
+    counts: Dict[str,int] = {}
+    total_rows = 0
+
+    def _scan_paths(paths: List[str|Path], kind: str):
+        nonlocal total_rows
+        for p in paths:
+            try:
+                for chunk in pd.read_csv(str(p), chunksize=5000):
+                    std = _standardize_chunk(chunk, kind)
+                    if std.empty: continue
+                    # filter by date & confidence
+                    m = (std["ActualTime"].dt.date >= since) & (std["ActualTime"].dt.date <= until)
+                    m &= (pd.to_numeric(std["Confidence"], errors="coerce") >= conf_thresh)
+                    filt = std.loc[m, ["Label"]]
+                    if filt.empty: continue
+                    vc = filt["Label"].value_counts()
+                    total_rows += int(vc.sum())
+                    for label, n in vc.items():
+                        if not label or str(label).lower() == "unknown":
+                            continue
+                        counts[label] = counts.get(label, 0) + int(n)
+            except Exception:
+                continue
+
+    _scan_paths([str(x) for x in bn_paths], "bn")
+    _scan_paths([str(x) for x in kn_paths], "kn")
+
+    ordered = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)
+    labels = [k for k,_ in ordered]
+    top3 = labels[:3]
+    also = labels[3:5]
+    return {"top3": top3, "also": also, "since": since, "until": until, "total_rows": total_rows}
+
+def _english_join(items: List[str]) -> str:
+    items = [s for s in items if s and s.strip()]
+    if not items: return ""
+    if len(items) == 1: return items[0]
+    if len(items) == 2: return f"{items[0]} and {items[1]}"
+    return ", ".join(items[:-1]) + f", and {items[-1]}"
+
+# ─────────────────────────────────────────────────────────────
+# Precompute splash gate (runs before tabs)
+# ─────────────────────────────────────────────────────────────
+def _load_root_csv_paths() -> Tuple[List[Path], List[Path]]:
+    if drive_enabled():
+        bn_meta, kn_meta = list_csvs_drive_root(GDRIVE_FOLDER_ID)
+        bn_paths = [ensure_csv_cached(m, subdir="root/bn") for m in bn_meta]
+        kn_paths = [ensure_csv_cached(m, subdir="root/kn") for m in kn_meta]
+    else:
+        bn_local, kn_local = list_csvs_local(ROOT_LOCAL)
+        bn_paths = [Path(p) for p in bn_local]
+        kn_paths = [Path(p) for p in kn_local]
+    return bn_paths, kn_paths
+
+def _render_branding(placeholder, subtitle="initialising…"):
+    with placeholder.container():
+        st.markdown(
+            f"""
+            <div class="center-wrap fade-enter">
+              <div>
+                <div class="brand-title">KōreroNET</div>
+                <div class="brand-sub">AUT</div>
+                <div class="pulse"></div>
+                <div class="small" style="margin-top:10px;">{subtitle}</div>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+def _render_gate_message(msg: str, since: date, until: date):
+    # Dark overlay with logos + message + button
+    st.markdown(
+        f"""
+        <div class="overlay {'fade-enter' if not st.session_state.get('overlay_fade', False) else 'fade-exit'}">
+          <div class="overlay-inner">
+            <div class="logos">
+              <div class="logo-pill">KōreroNET</div>
+              <div class="logo-pill">AUT</div>
+            </div>
+            <h1>Listening to nature</h1>
+            <h2 class="badge">{since.isoformat()} → {until.isoformat()}</h2>
+            <p>{msg}</p>
+            <div class="cta">
+        """,
+        unsafe_allow_html=True,
+    )
+    enter = st.button("Enter dashboard", type="primary", use_container_width=False, key="gate_enter_btn")
+    st.markdown("</div></div></div>", unsafe_allow_html=True)
+    return enter
+
+def _build_headline_text(res: Dict[str,Any]) -> str:
+    if not res or res.get("total_rows", 0) == 0 or not res.get("top3"):
+        return ("In the past week we didn’t record enough high-confidence detections "
+                "(confidence > 0.95, BN+KN combined) to identify dominant singers in Auckland.")
+    top = _english_join(res["top3"])
+    also = _english_join(res.get("also", []))
+    extra = f" We also detected {also}." if also else ""
+    return (f"In the past week, <strong>{top}</strong> were the dominant birds singing in Auckland "
+            f"(confidence &gt; 0.95, BN+KN combined).{extra}")
+
+def run_precompute_gate():
+    # If user already entered, skip gate
+    if st.session_state.get("gate_open", False):
+        return
+
+    # Phase 1: show branding while we locate CSVs and compute weekly stats
+    brand_ph = st.empty()
+    _render_branding(brand_ph, subtitle="loading data & analysing the last 7 days…")
+
+    bn_paths, kn_paths = _load_root_csv_paths()
+    weekly = compute_weekly_top_species(bn_paths, kn_paths, conf_thresh=0.95, days=7)
+    headline = _build_headline_text(weekly)
+
+    # Phase 2: replace with dark overlay + message; wait for user click
+    brand_ph.empty()  # logos remain re-rendered in overlay
+    clicked = _render_gate_message(headline, weekly.get("since", date.today()-timedelta(days=6)), weekly.get("until", date.today()))
+    if clicked:
+        # Fade once, then enter
+        st.session_state["overlay_fade"] = True
+        time.sleep(0.48)  # allow CSS fade-out
+        st.session_state["gate_open"] = True
+        st.rerun()
+    else:
+        # Do not build the rest of the app yet
+        st.stop()
+
+# Run the gate before anything else UI-heavy
+run_precompute_gate()
+
+# ─────────────────────────────────────────────────────────────
+# Tab 1 heatmap rendering helpers
+# ─────────────────────────────────────────────────────────────
 def standardize_df(df: pd.DataFrame, kind: str) -> pd.DataFrame:
     df = df.copy()
     df["Confidence"] = pd.to_numeric(df.get("Confidence", np.nan), errors="coerce")
@@ -309,8 +480,87 @@ def calendar_pick(available_days: List[date], label: str, help_txt: str = "") ->
     return d_val
 
 # ─────────────────────────────────────────────────────────────
-# Snapshot/master logic for Tab 2
+# Tabs
 # ─────────────────────────────────────────────────────────────
+tab1, tab_verify, tab3 = st.tabs(["📊 Detections", "🎧 Verify recordings", "⚡ Power"])
+
+# =========================
+# TAB 1 — Detections (root)
+# =========================
+with tab1:
+    center = st.empty()
+    with center.container():
+        st.markdown('<div class="center-wrap fade-enter"><div>🔎 Checking root CSVs…</div></div>', unsafe_allow_html=True)
+
+    if drive_enabled():
+        bn_meta, kn_meta = list_csvs_drive_root(GDRIVE_FOLDER_ID)
+    else:
+        bn_meta, kn_meta = [], []
+
+    if drive_enabled() and (bn_meta or kn_meta):
+        center.empty(); center = st.empty()
+        with center.container():
+            st.markdown('<div class="center-wrap"><div>⬇️ Downloading root CSVs…</div></div>', unsafe_allow_html=True)
+        bn_paths = [ensure_csv_cached(m, subdir="root/bn") for m in bn_meta]
+        kn_paths = [ensure_csv_cached(m, subdir="root/kn") for m in kn_meta]
+    else:
+        bn_local, kn_local = list_csvs_local(ROOT_LOCAL)
+        bn_paths = [Path(p) for p in bn_local]
+        kn_paths = [Path(p) for p in kn_local]
+
+    center.empty(); center = st.empty()
+    with center.container():
+        st.markdown('<div class="center-wrap"><div>🧮 Building date index…</div></div>', unsafe_allow_html=True)
+
+    bn_by_date = build_date_index(bn_paths) if bn_paths else {}
+    kn_by_date = build_date_index(kn_paths) if kn_paths else {}
+
+    center.empty()
+    bn_dates = sorted(bn_by_date.keys())
+    kn_dates = sorted(kn_by_date.keys())
+    paired_dates = sorted(set(bn_dates).intersection(set(kn_dates)))
+
+    src = st.selectbox("Source", ["KōreroNET (kn)", "BirdNET (bn)", "Combined"], index=0)
+    min_conf = st.slider("Minimum confidence", 0.0, 1.0, 0.90, 0.01)
+
+    if src == "Combined":
+        options, help_txt = paired_dates, "Only dates that have BOTH BN & KN detections."
+    elif src == "BirdNET (bn)":
+        options, help_txt = bn_dates, "Dates present in any BN file."
+    else:
+        options, help_txt = kn_dates, "Dates present in any KN file."
+
+    if not options:
+        st.warning(f"No available dates for {src}."); st.stop()
+
+    d = calendar_pick(options, "Day", help_txt)
+
+    def load_and_filter(paths: List[Path], kind: str, day_selected: date):
+        frames = []
+        for p in paths:
+            try:
+                df = load_csv(p)
+                std = standardize_df(df, kind)
+                std = std[std["ActualTime"].dt.date == day_selected]
+                if not std.empty: frames.append(std)
+            except Exception:
+                pass
+        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+    if st.button("Show results", type="primary", key="tab1_show_btn"):
+        with st.spinner("Rendering heatmap…"):
+            if src == "BirdNET (bn)":
+                make_heatmap(load_and_filter(bn_by_date.get(d, []), "bn", d), min_conf, f"BirdNET • {d.isoformat()}")
+            elif src == "KōreroNET (kn)":
+                make_heatmap(load_and_filter(kn_by_date.get(d, []), "kn", d), min_conf, f"KōreroNET • {d.isoformat()}")
+            else:
+                df_bn = load_and_filter(bn_by_date.get(d, []), "bn", d)
+                df_kn = load_and_filter(kn_by_date.get(d, []), "kn", d)
+                make_heatmap(pd.concat([df_bn, df_kn], ignore_index=True), min_conf, f"Combined (BN+KN) • {d.isoformat()}")
+
+# ================================
+# TAB 2 — Verify (snapshot date)
+# ================================
 SNAP_RE = re.compile(r"^(\d{8})_(\d{6})$", re.IGNORECASE)
 
 def _sanitize_label(s: str) -> str:
@@ -348,8 +598,8 @@ def _find_chunk_dirs(snapshot_id: str) -> Dict[str, str]:
     bn = [k for k in kids if k.get("mimeType")=="application/vnd.google-apps.folder" and "birdnet"   in k.get("name","").lower()]
     return {"KN": (kn[0]["id"] if kn else snapshot_id), "BN": (bn[0]["id"] if bn else snapshot_id)}
 
-def _match_master_name(name: str, kind: str) -> bool:
-    n = name.lower()
+def _match_master_name(n: str, kind: str) -> bool:
+    n = n.lower()
     if kind == "KN":
         return (("koreronet" in n) and ("detect" in n) and n.endswith(".csv"))
     else:
@@ -445,88 +695,6 @@ def build_master_index_by_snapshot_date(root_folder_id: str) -> pd.DataFrame:
     out.reset_index(drop=True, inplace=True)
     return out
 
-# ─────────────────────────────────────────────────────────────
-# Tabs
-# ─────────────────────────────────────────────────────────────
-tab1, tab_verify, tab3 = st.tabs(["📊 Detections", "🎧 Verify recordings", "⚡ Power"])
-
-# =========================
-# TAB 1 — Detections (root)
-# =========================
-with tab1:
-    center = st.empty()
-    with center.container():
-        st.markdown('<div class="center-wrap fade-enter"><div>🔎 Checking root CSVs…</div></div>', unsafe_allow_html=True)
-
-    if drive_enabled():
-        bn_meta, kn_meta = list_csvs_drive_root(GDRIVE_FOLDER_ID)
-    else:
-        bn_meta, kn_meta = [], []
-
-    if drive_enabled() and (bn_meta or kn_meta):
-        center.empty(); center = st.empty()
-        with center.container():
-            st.markdown('<div class="center-wrap"><div>⬇️ Downloading root CSVs…</div></div>', unsafe_allow_html=True)
-        bn_paths = [ensure_csv_cached(m, subdir="root/bn") for m in bn_meta]
-        kn_paths = [ensure_csv_cached(m, subdir="root/kn") for m in kn_meta]
-    else:
-        bn_local, kn_local = list_csvs_local(ROOT_LOCAL)
-        bn_paths = [Path(p) for p in bn_local]
-        kn_paths = [Path(p) for p in kn_local]
-
-    center.empty(); center = st.empty()
-    with center.container():
-        st.markdown('<div class="center-wrap"><div>🧮 Building date index…</div></div>', unsafe_allow_html=True)
-
-    bn_by_date = build_date_index(bn_paths) if bn_paths else {}
-    kn_by_date = build_date_index(kn_paths) if kn_paths else {}
-
-    center.empty()
-    bn_dates = sorted(bn_by_date.keys())
-    kn_dates = sorted(kn_by_date.keys())
-    paired_dates = sorted(set(bn_dates).intersection(set(kn_dates)))
-
-    src = st.selectbox("Source", ["KōreroNET (kn)", "BirdNET (bn)", "Combined"], index=0)
-    min_conf = st.slider("Minimum confidence", 0.0, 1.0, 0.90, 0.01)
-
-    if src == "Combined":
-        options, help_txt = paired_dates, "Only dates that have BOTH BN & KN detections."
-    elif src == "BirdNET (bn)":
-        options, help_txt = bn_dates, "Dates present in any BN file."
-    else:
-        options, help_txt = kn_dates, "Dates present in any KN file."
-
-    if not options:
-        st.warning(f"No available dates for {src}."); st.stop()
-
-    d = calendar_pick(options, "Day", help_txt)
-
-    def load_and_filter(paths: List[Path], kind: str, day_selected: date):
-        frames = []
-        for p in paths:
-            try:
-                df = load_csv(p)
-                std = standardize_df(df, kind)
-                std = std[std["ActualTime"].dt.date == day_selected]
-                if not std.empty: frames.append(std)
-            except Exception:
-                pass
-        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-
-    if st.button("Show results", type="primary", key="tab1_show_btn"):
-        with st.spinner("Rendering heatmap…"):
-            if src == "BirdNET (bn)":
-                make_heatmap(load_and_filter(bn_by_date.get(d, []), "bn", d), min_conf, f"BirdNET • {d.isoformat()}")
-            elif src == "KōreroNET (kn)":
-                make_heatmap(load_and_filter(kn_by_date.get(d, []), "kn", d), min_conf, f"KōreroNET • {d.isoformat()}")
-            else:
-                df_bn = load_and_filter(bn_by_date.get(d, []), "bn", d)
-                df_kn = load_and_filter(kn_by_date.get(d, []), "kn", d)
-                make_heatmap(pd.concat([df_bn, df_kn], ignore_index=True), min_conf, f"Combined (BN+KN) • {d.isoformat()}")
-
-# ================================
-# TAB 2 — Verify (snapshot date)
-# ================================
 with tab_verify:
     if not drive_enabled():
         st.error("Google Drive is not configured in secrets."); st.stop()
@@ -625,14 +793,6 @@ with tab3:
     if not drive_enabled():
         st.error("Google Drive is not configured in secrets."); st.stop()
 
-    # Locate 'Power logs' under the Drive root
-    def find_subfolder_by_name(root_id: str, name_ci: str) -> Optional[Dict[str, Any]]:
-        kids = list_children(root_id, max_items=2000)
-        for k in kids:
-            if k.get("mimeType")=="application/vnd.google-apps.folder" and k.get("name","").lower()==name_ci.lower():
-                return k
-        return None
-
     logs_folder = find_subfolder_by_name(GDRIVE_FOLDER_ID, "Power logs")
     if not logs_folder:
         st.warning("Could not find 'Power logs' folder under the Drive root.")
@@ -675,8 +835,6 @@ with tab3:
             return None
         lines = [l.strip() for l in text.splitlines() if l.strip()]
         if not lines: return None
-
-        # Header timestamp (first line)
         try:
             head_dt = datetime.strptime(lines[0], "%Y-%m-%d %H:%M:%S")
         except Exception:
@@ -684,11 +842,8 @@ with tab3:
             for l in lines[:3]:
                 m = re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", l)
                 if m:
-                    try:
-                        head_dt = datetime.strptime(m.group(0), "%Y-%m-%d %H:%M:%S")
-                        break
-                    except Exception:
-                        pass
+                    try: head_dt = datetime.strptime(m.group(0), "%Y-%m-%d %H:%M:%S"); break
+                    except Exception: pass
         if head_dt is None:
             return None
 
