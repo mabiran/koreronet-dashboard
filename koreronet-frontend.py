@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-KōreroNET Dashboard — Google Drive edition (masters inside snapshot root or subfolders)
+KōreroNET Dashboard — Google Drive (masters inside snapshot root or subfolders)
 
-What’s new vs previous:
-• Master CSVs are discovered flexibly inside each snapshot (root OR subfolders), case-insensitive.
-• Chunk folders are discovered by name contains("koreronet"/"birdnet"); fallback to snapshot root if absent.
-• Everything else stays fast: no crawling per-file CSVs; only the two masters per snapshot are read.
+• Tab 1 (Detections): calendar input limited by min/max, snaps to nearest available day if empty.
+• Tab 2 (Verify): uses master CSVs per snapshot (no per-file crawling), calendar input with the same snapping.
+• Tab 3 (Drive): quick browser.
+
+Drive lookup:
+- Finds master CSVs flexibly anywhere under each snapshot (root OR one-level subfolders).
+- Finds chunk folders named like "koreronet" / "birdnet"; falls back to snapshot root if not found.
+- Downloads audio chunks on demand only.
 """
 
 import os, io, re, glob, json
@@ -27,10 +31,10 @@ st.markdown("""
 <style>
 .block-container {padding-top:1rem; padding-bottom:1rem;}
 .center-wrap {display:flex; align-items:center; justify-content:center; min-height:140px;}
-.fade {opacity:0.92; transition: opacity 300ms ease-in-out;}
+.fade {opacity:0.95; transition: opacity 300ms ease-in-out;}
 .stTabs [role="tablist"] {gap:.5rem;}
 .stTabs [role="tab"] {padding:.6rem 1rem; border-radius:999px; border:1px solid #3a3a3a;}
-.small {font-size:0.9rem; opacity:0.8;}
+.small {font-size:0.9rem; opacity:0.85;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -98,9 +102,7 @@ def list_children(folder_id: str, max_items: int = 2000) -> List[Dict[str, Any]]
             pageSize=page_size,
             pageToken=token,
             orderBy="folder,name_natural",
-            includeItemsFromAllDrives=True,
-            supportsAllDrives=True,
-            corpora="allDrives",
+            includeItemsFromAllDrives=True, supportsAllDrives=True, corpora="allDrives",
         ).execute()
         items.extend(resp.get("files", []))
         token = resp.get("nextPageToken")
@@ -128,7 +130,7 @@ def ensure_chunk_cached(chunk_name: str, folder_id: str, subdir: str) -> Optiona
     local_path = CHUNK_CACHE / subdir / chunk_name
     if local_path.exists():
         return local_path
-    # look up by exact name (only in given folder)
+    # exact-name lookup within indicated folder
     for k in list_children(folder_id, max_items=2000):
         if k.get("name") == chunk_name:
             try:
@@ -238,7 +240,7 @@ def _sanitize_label(s: str) -> str:
     return s
 
 def _compose_chunk_name(kind: str, wav_base: str, start: float, end: float, label: str, conf: float) -> str:
-    root = Path(wav_base).stem  # 19700102_011820
+    root = Path(wav_base).stem  # e.g., 19700102_011820
     start_s = f"{float(start):06.2f}"
     end_s   = f"{float(end):06.2f}"
     lab     = _sanitize_label(label)
@@ -270,20 +272,13 @@ def _match_master_name(name: str, kind: str) -> bool:
         return (("birdnet" in n) and ("detect" in n) and n.endswith(".csv"))
 
 def _find_master_csv_meta_anywhere(snapshot_id: str, kind: str) -> Optional[Dict[str, Any]]:
-    """
-    Search master CSV inside snapshot root first; if not found, search one level down in subfolders.
-    Match is case-insensitive and flexible (e.g., 'koreronet_detections_all.csv', 'koreronet_detections.csv').
-    """
     # 1) root
     root_kids = list_children(snapshot_id, max_items=2000)
     root_files = [f for f in root_kids if f.get("mimeType") != "application/vnd.google-apps.folder"]
     candidates = [f for f in root_files if _match_master_name(f.get("name",""), kind)]
     if candidates:
-        # choose newest by modifiedTime if available
         candidates.sort(key=lambda m: m.get("modifiedTime",""), reverse=True)
-        meta = dict(candidates[0])
-        return meta
-
+        return dict(candidates[0])
     # 2) one-level subfolders
     subfolders = [f for f in root_kids if f.get("mimeType") == "application/vnd.google-apps.folder"]
     for sf in subfolders:
@@ -292,9 +287,7 @@ def _find_master_csv_meta_anywhere(snapshot_id: str, kind: str) -> Optional[Dict
         cands = [f for f in sub_files if _match_master_name(f.get("name",""), kind)]
         if cands:
             cands.sort(key=lambda m: m.get("modifiedTime",""), reverse=True)
-            meta = dict(cands[0])
-            return meta
-
+            return dict(cands[0])
     return None
 
 @st.cache_data(show_spinner=True)
@@ -322,7 +315,7 @@ def build_master_index(folder_id: str) -> pd.DataFrame:
     snaps = list_snapshots_drive(folder_id)
     for sn in snaps:
         snap_id = sn["id"]
-        chunk_dirs = _find_chunk_folders(snap_id)  # may fallback to snapshot root
+        chunk_dirs = _find_chunk_folders(snap_id)
 
         # KN (koreronet) master
         kn_meta = _find_master_csv_meta_anywhere(snap_id, kind="KN")
@@ -399,6 +392,32 @@ def build_master_index(folder_id: str) -> pd.DataFrame:
     return out
 
 # ─────────────────────────────────────────────────────────────
+# Utility: calendar with safe snapping to available days
+# ─────────────────────────────────────────────────────────────
+def calendar_pick(available_days: List[date], label: str, help_txt: str = "") -> date:
+    """
+    Shows st.date_input with min/max bounds.
+    If user selects a day with no data, snaps to nearest earlier day; if none earlier, to nearest later.
+    """
+    if not available_days:
+        st.stop()
+    available_days = sorted(available_days)
+    d_min, d_max = available_days[0], available_days[-1]
+    # default = latest with data
+    d_val = st.date_input(label, value=d_max, min_value=d_min, max_value=d_max, help=help_txt)
+    # Snap if necessary
+    if d_val not in set(available_days):
+        earlier = [x for x in available_days if x <= d_val]
+        if earlier:
+            d_val = earlier[-1]
+            st.info(f"No data on chosen date; showing {d_val.isoformat()} (nearest earlier).")
+        else:
+            later = [x for x in available_days if x >= d_val]
+            d_val = later[0]
+            st.info(f"No data on chosen date; showing {d_val.isoformat()} (nearest later).")
+    return d_val
+
+# ─────────────────────────────────────────────────────────────
 # Tabs
 # ─────────────────────────────────────────────────────────────
 tab1, tab_verify, tab3 = st.tabs(["📊 Detections", "🎧 Verify recordings", "📁 Drive"])
@@ -452,7 +471,8 @@ with tab1:
     if not options:
         st.warning(f"No available dates for {src}."); st.stop()
 
-    d = st.selectbox("Day", options=options, index=len(options)-1, format_func=lambda dt: dt.isoformat(), help=help_txt)
+    # Calendar (with snapping)
+    d = calendar_pick(options, "Day", help_txt)
 
     def load_and_filter(paths: List[Path], kind: str, day_selected: date):
         frames = []
@@ -467,14 +487,15 @@ with tab1:
         return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
     if st.button("Update", type="primary"):
-        if src == "BirdNET (bn)":
-            make_heatmap(load_and_filter(bn_by_date.get(d, []), "bn", d), min_conf, f"BirdNET • {d.isoformat()}")
-        elif src == "KōreroNET (kn)":
-            make_heatmap(load_and_filter(kn_by_date.get(d, []), "kn", d), min_conf, f"KōreroNET • {d.isoformat()}")
-        else:
-            df_bn = load_and_filter(bn_by_date.get(d, []), "bn", d)
-            df_kn = load_and_filter(kn_by_date.get(d, []), "kn", d)
-            make_heatmap(pd.concat([df_bn, df_kn], ignore_index=True), min_conf, f"Combined (BN+KN) • {d.isoformat()}")
+        with st.spinner("Rendering heatmap…"):
+            if src == "BirdNET (bn)":
+                make_heatmap(load_and_filter(bn_by_date.get(d, []), "bn", d), min_conf, f"BirdNET • {d.isoformat()}")
+            elif src == "KōreroNET (kn)":
+                make_heatmap(load_and_filter(kn_by_date.get(d, []), "kn", d), min_conf, f"KōreroNET • {d.isoformat()}")
+            else:
+                df_bn = load_and_filter(bn_by_date.get(d, []), "bn", d)
+                df_kn = load_and_filter(kn_by_date.get(d, []), "kn", d)
+                make_heatmap(pd.concat([df_bn, df_kn], ignore_index=True), min_conf, f"Combined (BN+KN) • {d.isoformat()}")
 
 # ================================
 # TAB 2 — Verify (MASTER CSV ONLY)
@@ -510,8 +531,9 @@ with tab_verify:
     if pool.empty:
         st.info("No rows above the selected confidence."); st.stop()
 
+    # Calendar (with snapping) — built from available rows
     avail_days = sorted(pool["Date"].unique())
-    day_pick = st.selectbox("Day", options=avail_days, index=len(avail_days)-1, format_func=lambda d: d.isoformat())
+    day_pick = calendar_pick(avail_days, "Day", "Filter detections by calendar day.")
 
     day_df = pool[pool["Date"] == day_pick]
     if day_df.empty:
