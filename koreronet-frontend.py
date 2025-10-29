@@ -763,7 +763,7 @@ with tab3:
             fig.update_layout(
                 title="Power / State of Charge over time",
                 xaxis=dict(title="Time"),
-                yaxis=dict(title="SoC (%)", rangemode="tozero"),
+                yaxis=dict(title="SoC (%)", range=[0,100]),
                 yaxis2=dict(title="Wh", overlaying="y", side="right"),
                 legend=dict(orientation="h"),
                 margin=dict(l=10, r=10, t=50, b=10),
