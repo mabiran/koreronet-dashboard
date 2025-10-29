@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# KōreroNET Dashboard (with precompute splash + 24h headline)
+# KōreroNET Dashboard (with precompute splash + 48h headline, KN-only)
 # ------------------------------------------------------------
 # Landing flow:
 #   1) Show dark splash with KōreroNET + AUT + GeoEnviroSense while computing.
-#   2) Compute last-24h top species (BN + KN root CSVs; confidence threshold still used internally,
+#   2) Compute last-48h top species (KōreroNET root CSVs only; confidence threshold used internally,
 #      but NOT mentioned in the text).
-#   3) Show a minimal sentence (no dates). On click/tap, fade and enter the app (no freeze).
+#   3) Show a minimal sentence (no dates). On click/tap anywhere (or button), fade and enter the app (no freeze).
 #
 # Tabs:
 #   - Tab 1: Root CSV heatmaps (Drive or local) with calendar + min confidence
@@ -62,6 +62,29 @@ st.markdown("""
 .logo-pill {font-weight:800; font-size:1.05rem; letter-spacing:.06em; border:1px solid #3a3a3a; border-radius:999px; padding:.35rem .7rem;}
 </style>
 """, unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────────────────────
+# Query params helpers (used by click-anywhere dismiss)
+# ─────────────────────────────────────────────────────────────
+def _get_qp():
+    try:
+        return dict(st.query_params)  # Streamlit >=1.32
+    except Exception:
+        return {k: v[0] if isinstance(v, list) and v else v for k, v in st.experimental_get_query_params().items()}
+
+def _set_qp(**kwargs):
+    try:
+        st.query_params.clear()
+        for k, v in kwargs.items():
+            st.query_params[k] = v
+    except Exception:
+        st.experimental_set_query_params(**kwargs)
+
+# If JS already set ?go=1, open the gate
+_qp = _get_qp()
+if _qp.get("go") == "1":
+    st.session_state["gate_open"] = True
+    _set_qp()  # clean URL
 
 # ─────────────────────────────────────────────────────────────
 # Caches & local fallback
@@ -197,182 +220,6 @@ def list_csvs_drive_root(folder_id: str) -> Tuple[List[Dict[str, Any]], List[Dic
     bn.sort(key=lambda m: m.get("name","")); kn.sort(key=lambda m: m.get("name",""))
     return bn, kn
 
-def _standardize_chunk(chunk: pd.DataFrame, kind: str) -> pd.DataFrame:
-    c = chunk.copy()
-
-    # Confidence
-    conf_col = None
-    for col in c.columns:
-        if col.lower() == "confidence": conf_col = col; break
-    c["Confidence"] = pd.to_numeric(c[conf_col], errors="coerce") if conf_col else np.nan
-
-    # Label
-    label_col = None
-    if kind == "bn":
-        for col in c.columns:
-            if col.lower() in ("common name","common_name","label","species","class"):
-                label_col = col; break
-    else:
-        for col in c.columns:
-            if col.lower() in ("label","common name","common_name","species","class"):
-                label_col = col; break
-    c["Label"] = c[label_col].astype(str) if label_col else "Unknown"
-
-    # Time
-    at_col = None
-    for col in c.columns:
-        if col.lower() == "actualtime": at_col = col; break
-    c["ActualTime"] = pd.to_datetime(c[at_col], errors="coerce", dayfirst=True) if at_col else pd.NaT
-
-    c = c.dropna(subset=["ActualTime", "Label"])
-    return c[["Label","Confidence","ActualTime"]]
-
-@st.cache_data(show_spinner=True, ttl=600)
-def compute_recent_top_species(
-    bn_paths: List[str|Path], kn_paths: List[str|Path],
-    conf_thresh: float = 0.95, lookback_hours: int = 24
-) -> Dict[str, Any]:
-    """Scan last `lookback_hours` across BN+KN; return {'top3': [], 'also': [], 'n': int}."""
-    now = pd.Timestamp.now()
-    since = now - pd.Timedelta(hours=lookback_hours)
-    counts: Dict[str,int] = {}
-    n_rows = 0
-
-    def _scan(paths: List[str|Path], kind: str):
-        nonlocal n_rows
-        for p in paths:
-            try:
-                for chunk in pd.read_csv(str(p), chunksize=5000):
-                    std = _standardize_chunk(chunk, kind)
-                    if std.empty: continue
-                    m = (std["ActualTime"] >= since) & (std["ActualTime"] <= now)
-                    m &= (pd.to_numeric(std["Confidence"], errors="coerce") >= conf_thresh)
-                    filt = std.loc[m, ["Label"]]
-                    if filt.empty: continue
-                    vc = filt["Label"].value_counts()
-                    n_rows += int(vc.sum())
-                    for label, n in vc.items():
-                        if not label or str(label).lower() == "unknown":
-                            continue
-                        counts[label] = counts.get(label, 0) + int(n)
-            except Exception:
-                continue
-
-    _scan([str(x) for x in bn_paths], "bn")
-    _scan([str(x) for x in kn_paths], "kn")
-
-    ordered = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)
-    labels = [k for k,_ in ordered]
-    top3 = labels[:3]
-    also = labels[3:5]
-    return {"top3": top3, "also": also, "n": n_rows}
-
-def _english_join(items: List[str]) -> str:
-    items = [s for s in items if s and s.strip()]
-    if not items: return ""
-    if len(items) == 1: return items[0]
-    if len(items) == 2: return f"{items[0]} and {items[1]}"
-    return ", ".join(items[:-1]) + f", and {items[-1]}"
-
-def _build_minimal_sentence(res: Dict[str,Any]) -> str:
-    if not res or res.get("n", 0) == 0 or not res.get("top3"):
-        return ("In the last 24 hours, we didn’t record enough detections to summarise dominant singers "
-                "in the Auckland-Orakei region.")
-    top = _english_join(res["top3"])
-    also = _english_join(res.get("also", []))
-    extra = f" We also detected {also} and many more on Node 0." if also else " We also detected many more on Node 0."
-    return f"In the last 24 hours, {top} were the dominant birds singing in the Auckland-Orakei region." + extra
-
-# ─────────────────────────────────────────────────────────────
-# Precompute gate (runs before tabs)
-# ─────────────────────────────────────────────────────────────
-def _load_root_csv_paths() -> Tuple[List[Path], List[Path]]:
-    if drive_enabled():
-        bn_meta, kn_meta = list_csvs_drive_root(GDRIVE_FOLDER_ID)
-        bn_paths = [ensure_csv_cached(m, subdir="root/bn") for m in bn_meta]
-        kn_paths = [ensure_csv_cached(m, subdir="root/kn") for m in kn_meta]
-    else:
-        bn_local, kn_local = list_csvs_local(ROOT_LOCAL)
-        bn_paths = [Path(p) for p in bn_local]
-        kn_paths = [Path(p) for p in kn_local]
-    return bn_paths, kn_paths
-
-def _render_branding(placeholder, subtitle="initialising…"):
-    with placeholder.container():
-        st.markdown(
-            f"""
-            <div class="center-wrap fade-enter">
-              <div>
-                <div class="brand-title">KōreroNET</div>
-                <div class="brand-sub">AUT</div>
-                <div class="pulse"></div>
-                <div class="small" style="margin-top:10px;">{subtitle}</div>
-              </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-def _render_gate_message(msg: str):
-    st.markdown(
-        f"""
-        <div class="overlay" id="gate">
-          <div class="overlay-inner">
-            <div class="logos">
-              <div class="logo-pill">KōreroNET</div>
-              <div class="logo-pill">AUT</div>
-              <div class="logo-pill">GeoEnviroSense</div>
-            </div>
-            <h1>Listening to nature</h1>
-            <p>{msg}</p>
-            <div class="cta">
-        """,
-        unsafe_allow_html=True,
-    )
-    # Big button that always works; on click, we fade then rerun.
-    clicked = st.button("Enter dashboard", type="primary", key="gate_enter_btn")
-    st.markdown("</div></div></div>", unsafe_allow_html=True)
-    return clicked
-
-def run_precompute_gate():
-    # Skip gate entirely once opened
-    if st.session_state.get("gate_open", False):
-        return
-
-    # Phase 1: show branding while we load & compute
-    brand_ph = st.empty()
-    _render_branding(brand_ph, subtitle="loading data & analysing the last 24 hours…")
-
-    # Compute recent top species
-    bn_paths, kn_paths = _load_root_csv_paths()
-    recent = compute_recent_top_species(bn_paths, kn_paths, conf_thresh=0.95, lookback_hours=24)
-    headline = _build_minimal_sentence(recent)
-
-    # Phase 2: overlay with message and button
-    brand_ph.empty()
-    if _render_gate_message(headline):
-        # Visual fade, then open gate; ensure no freeze
-        fade_ph = st.empty()
-        with fade_ph.container():
-            st.markdown('<div class="overlay fade-exit"></div>', unsafe_allow_html=True)
-        time.sleep(0.35)
-        st.session_state["gate_open"] = True
-        st.rerun()
-    else:
-        # Hold here until user clicks
-        st.stop()
-
-# Run the gate before building the rest of the UI
-run_precompute_gate()
-
-# ─────────────────────────────────────────────────────────────
-# Node Select (top bar)
-# ─────────────────────────────────────────────────────────────
-node = st.selectbox("Node Select", ["Auckland-Orākei"], index=0, key="node_select_top")
-
-# ─────────────────────────────────────────────────────────────
-# Tab 1 (root CSV heatmap)
-# ─────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def extract_dates_from_csv(path: str | Path) -> List[date]:
     path = str(path)
@@ -463,6 +310,191 @@ def calendar_pick(available_days: List[date], label: str, help_txt: str = "") ->
     return d_val
 
 # ─────────────────────────────────────────────────────────────
+# KN-only 48h headline builder (overlay text)
+# ─────────────────────────────────────────────────────────────
+@st.cache_data(show_spinner=False)
+def list_kn_csvs_local(root: str) -> List[str]:
+    return sorted(glob.glob(os.path.join(root, "kn*.csv")))
+
+@st.cache_data(show_spinner=False)
+def list_kn_csvs_drive_root(folder_id: str) -> List[Dict[str, Any]]:
+    kids = list_children(folder_id, max_items=2000)
+    kn = [k for k in kids if k.get("name","").lower().startswith("kn") and k.get("name","").lower().endswith(".csv")]
+    kn.sort(key=lambda m: m.get("name",""))
+    return kn
+
+def _standardize_chunk_kn(chunk: pd.DataFrame) -> pd.DataFrame:
+    c = chunk.copy()
+    # Confidence
+    conf_col = next((col for col in c.columns if col.lower()=="confidence"), None)
+    c["Confidence"] = pd.to_numeric(c[conf_col], errors="coerce") if conf_col else np.nan
+    # Label
+    label_col = next((col for col in c.columns if col.lower() in ("label","common name","common_name","species","class")), None)
+    c["Label"] = c[label_col].astype(str) if label_col else "Unknown"
+    # Time
+    at_col = next((col for col in c.columns if col.lower()=="actualtime"), None)
+    c["ActualTime"] = pd.to_datetime(c[at_col], errors="coerce", dayfirst=True) if at_col else pd.NaT
+    c = c.dropna(subset=["ActualTime","Label"])
+    return c[["Label","Confidence","ActualTime"]]
+
+@st.cache_data(show_spinner=True, ttl=600)
+def compute_recent_top_species_kn(
+    kn_paths: List[str|Path], conf_thresh: float = 0.95, lookback_hours: int = 48
+) -> Dict[str, Any]:
+    """Scan last 48h across KōreroNET CSVs only."""
+    now = pd.Timestamp.now()
+    since = now - pd.Timedelta(hours=lookback_hours)
+    counts: Dict[str,int] = {}
+    n_rows = 0
+    possum_count = 0
+
+    for p in kn_paths:
+        try:
+            for chunk in pd.read_csv(str(p), chunksize=5000):
+                std = _standardize_chunk_kn(chunk)
+                if std.empty: continue
+                m = (std["ActualTime"] >= since) & (std["ActualTime"] <= now)
+                m &= (pd.to_numeric(std["Confidence"], errors="coerce") >= conf_thresh)
+                filt = std.loc[m, ["Label"]]
+                if filt.empty: continue
+                vc = filt["Label"].value_counts()
+                n_rows += int(vc.sum())
+                for label, n in vc.items():
+                    if not label or str(label).lower() == "unknown":
+                        continue
+                    counts[label] = counts.get(label, 0) + int(n)
+                    if "possum" in str(label).lower():  # catch 'possum' anywhere (e.g., 'brushtail possum')
+                        possum_count += int(n)
+        except Exception:
+            continue
+
+    ordered = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)
+    labels = [k for k,_ in ordered]
+    top3 = labels[:3]
+    return {"top3": top3, "n": n_rows, "possum": possum_count}
+
+def _english_join(items: List[str]) -> str:
+    items = [s for s in items if s and s.strip()]
+    if not items: return ""
+    if len(items) == 1: return items[0]
+    if len(items) == 2: return f"{items[0]} and {items[1]}"
+    return ", ".join(items[:-1]) + f", and {items[-1]}"
+
+def _build_minimal_sentence_kn(res: Dict[str,Any]) -> str:
+    # Minimal, no dates, mention Auckland-Orākei and Node 0; possum clause if zero.
+    if not res or res.get("n", 0) == 0 or not res.get("top3"):
+        base = "In the last 48 hours, not enough detections to summarise dominant singers in the Auckland-Orākei region. We also detected many more on Node 0."
+    else:
+        top = _english_join(res["top3"])
+        base = f"In the last 48 hours, {top} were the dominant birds singing in the Auckland-Orākei region. We also detected many more on Node 0."
+    if int(res.get("possum", 0)) == 0:
+        base += " No possum detected."
+    return base
+
+def _load_kn_csv_paths() -> List[Path]:
+    if drive_enabled():
+        kn_meta = list_kn_csvs_drive_root(GDRIVE_FOLDER_ID)
+        kn_paths = [ensure_csv_cached(m, subdir="root/kn") for m in kn_meta]
+    else:
+        kn_local = list_kn_csvs_local(ROOT_LOCAL)
+        kn_paths = [Path(p) for p in kn_local]
+    return kn_paths
+
+def _render_branding(placeholder, subtitle="initialising…"):
+    with placeholder.container():
+        st.markdown(
+            f"""
+            <div class="center-wrap fade-enter">
+              <div>
+                <div class="brand-title">KōreroNET</div>
+                <div class="brand-sub">AUT</div>
+                <div class="pulse"></div>
+                <div class="small" style="margin-top:10px;">{subtitle}</div>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+def _render_gate_overlay(msg: str):
+    st.markdown(
+        f"""
+        <div class="overlay fade-enter" id="gate">
+          <div class="overlay-inner">
+            <div class="logos">
+              <div class="logo-pill">KōreroNET</div>
+              <div class="logo-pill">AUT</div>
+              <div class="logo-pill">GeoEnviroSense</div>
+            </div>
+            <h1>listening to nature</h1>
+            <p>{msg}</p>
+            <div class="cta">
+        """,
+        unsafe_allow_html=True,
+    )
+    clicked = st.button("Enter dashboard", type="primary", key="gate_enter_btn")
+    st.markdown("</div></div></div>", unsafe_allow_html=True)
+
+    # Click/touch ANYWHERE to dismiss (sets ?go=1 and triggers rerun)
+    st.markdown("""
+    <script>
+    (function(){
+      const gate = document.getElementById('gate');
+      if(!gate) return;
+      function closeGate(){
+        try {
+          const url = new URL(window.location.href);
+          url.searchParams.set('go','1');
+          window.location.href = url.toString();
+        } catch(e){
+          window.location.search='?go=1';
+        }
+      }
+      gate.addEventListener('click', closeGate, {passive:true});
+      gate.addEventListener('touchstart', closeGate, {passive:true});
+    })();
+    </script>
+    """, unsafe_allow_html=True)
+
+    return clicked
+
+def run_precompute_gate():
+    # Skip gate entirely once opened
+    if st.session_state.get("gate_open", False):
+        return
+
+    # Phase 1: show branding while we load & compute
+    brand_ph = st.empty()
+    _render_branding(brand_ph, subtitle="loading data & analysing the last 48 hours…")
+
+    # Compute recent top species (KN-only)
+    kn_paths = _load_kn_csv_paths()
+    recent = compute_recent_top_species_kn(kn_paths, conf_thresh=0.95, lookback_hours=48)
+    headline = _build_minimal_sentence_kn(recent)
+
+    # Phase 2: overlay with message and button
+    brand_ph.empty()
+    if _render_gate_overlay(headline):
+        # Visual fade, then open gate; ensure no freeze
+        fade_ph = st.empty()
+        with fade_ph.container():
+            st.markdown('<div class="overlay fade-exit"></div>', unsafe_allow_html=True)
+        time.sleep(0.35)
+        st.session_state["gate_open"] = True
+        st.rerun()
+    else:
+        # Hold here until user clicks or taps (JS will set ?go=1)
+        st.stop()
+
+# Run the gate before building the rest of the UI
+run_precompute_gate()
+
+# ─────────────────────────────────────────────────────────────
+# Node Select (top bar)
+# ─────────────────────────────────────────────────────────────
+node = st.selectbox("Node Select", ["Auckland-Orākei"], index=0, key="node_select_top")
+
+# ─────────────────────────────────────────────────────────────
 # Tabs
 # ─────────────────────────────────────────────────────────────
 tab1, tab_verify, tab3 = st.tabs(["📊 Detections", "🎧 Verify recordings", "⚡ Power"])
@@ -494,13 +526,6 @@ with tab1:
     center.empty(); center = st.empty()
     with center.container():
         st.markdown('<div class="center-wrap"><div>🧮 Building date index…</div></div>', unsafe_allow_html=True)
-
-    def build_date_index(paths: List[Path]) -> Dict[date, List[str]]:
-        idx: Dict[date, List[str]] = {}
-        for p in paths:
-            for d in extract_dates_from_csv(p):
-                idx.setdefault(d, []).append(str(p))
-        return idx
 
     bn_by_date = build_date_index(bn_paths) if bn_paths else {}
     kn_by_date = build_date_index(kn_paths) if kn_paths else {}
@@ -722,21 +747,6 @@ with tab_verify:
         st.info("No rows above the selected confidence."); st.stop()
 
     avail_days = sorted(pool["Date"].unique())
-    def calendar_pick(available_days: List[date], label: str, help_txt: str = "") -> date:
-        available_days = sorted(available_days)
-        d_min, d_max = available_days[0], available_days[-1]
-        d_val = st.date_input(label, value=d_max, min_value=d_min, max_value=d_max, help=help_txt)
-        if d_val not in set(available_days):
-            earlier = [x for x in available_days if x <= d_val]
-            if earlier:
-                d_val = earlier[-1]
-                st.info(f"No data on chosen date; showing {d_val.isoformat()} (nearest earlier).")
-            else:
-                later = [x for x in available_days if x >= d_val]
-                d_val = later[0]
-                st.info(f"No data on chosen date; showing {d_val.isoformat()} (nearest later).")
-        return d_val
-
     day_pick = calendar_pick(list(avail_days), "Day", "Dates come from snapshot folder names under Backup/.")
 
     day_df = pool[pool["Date"] == day_pick]
