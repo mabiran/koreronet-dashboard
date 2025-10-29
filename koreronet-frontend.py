@@ -739,7 +739,7 @@ with tab3:
 
     cols = st.columns([2,1])
     with cols[0]:
-        lookback = st.number_input("How many latest logs to stitch", min_value=3, max_value=50, value=7, step=1, key="tab3_lookback")
+        lookback = st.number_input("How many latest logs to stitch", min_value=1, max_value=50, value=2, step=1, key="tab3_lookback")
     with cols[1]:
         pass
 
