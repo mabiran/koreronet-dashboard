@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# KōreroNET Dashboard (with overlay gate + Drive)
+# KōreroNET Dashboard (with splash + Drive)
 # ------------------------------------------------------------
-# - Overlay gate page (“KōreroNET”, “AUT”, “GeoEnviroSense”) + Load button
+# - Splash screen (“KōreroNET” + “AUT”) for ~2s, then main UI
 # - Node Select at top (single option: Auckland-Orākei)
 # - Tab 1: Root CSV heatmaps (Drive or local) with calendar + min confidence
 # - Tab 2: Verify using snapshot date (Backup/YYYYMMDD_HHMMSS) and master CSVs;
@@ -46,7 +46,7 @@ st.markdown("""
 .block-container {padding-top:1rem; padding-bottom:1rem;}
 .center-wrap {display:flex; align-items:center; justify-content:center; min-height:65vh; text-align:center;}
 .brand-title {font-size: clamp(48px, 8vw, 96px); font-weight: 800; letter-spacing: .02em;}
-.brand-sub {font-size: clamp(22px, 3.5vw, 40px); font-weight: 700; opacity:.95; margin-top:.25rem;}
+.brand-sub {font-size: clamp(28px, 4vw, 48px); font-weight: 600; opacity:.9; margin-top:.4rem;}
 .fade-enter {animation: fadeIn 400ms ease forwards;}
 .fade-exit  {animation: fadeOut 400ms ease forwards;}
 @keyframes fadeIn { from {opacity:0} to {opacity:1} }
@@ -56,61 +56,31 @@ st.markdown("""
 .stTabs [role="tablist"] {gap:.5rem;}
 .stTabs [role="tab"] {padding:.6rem 1rem; border-radius:999px; border:1px solid #3a3a3a;}
 .small {font-size:0.9rem; opacity:0.85;}
-
-/* Overlay gate */
-.gate-wrap {
-  position: relative;
-  isolation: isolate;
-}
-.gate-overlay {
-  position: fixed; inset: 0; z-index: 9999;
-  display: grid; place-items: center;
-  background:
-    radial-gradient(1200px 600px at 50% -10%, #1a1a1a 0%, #0b0b0b 60%, #070707 100%);
-}
-.gate-card {
-  display:grid; gap:.25rem; justify-items:center;
-  border:1px solid #2a2a2a; border-radius:24px; padding:2rem 2.25rem;
-  box-shadow: 0 10px 40px rgba(0,0,0,.45), inset 0 0 0 1px rgba(255,255,255,.03);
-  background: linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,.01));
-}
-.gate-logos { display:grid; gap:.25rem; justify-items:center; }
-.gate-logos .brand-title { margin-bottom:.1rem; }
-.gate-logos .brand-sub:last-child { opacity:.9; }
 </style>
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────
-# Overlay gate (click to load dashboard)
+# Simple splash gate
 # ─────────────────────────────────────────────────────────────
-if not st.session_state.get("gate_done", False):
-    holder = st.empty()
-    with holder.container():
-        st.markdown('<div class="gate-wrap">', unsafe_allow_html=True)
+if "splash_done" not in st.session_state:
+    placeholder = st.empty()
+    with placeholder.container():
         st.markdown(
             """
-            <div class="gate-overlay fade-enter">
-              <div class="gate-card">
-                <div class="gate-logos">
-                  <div class="brand-title">KōreroNET</div>
-                  <div class="brand-sub">AUT</div>
-                  <div class="brand-sub">GeoEnviroSense</div>
-                </div>
+            <div class="center-wrap fade-enter">
+              <div>
+                <div class="brand-title">KōreroNET</div>
+                <div class="brand-sub">AUT</div>
                 <div class="pulse"></div>
-                <div class="small" style="margin-top:.4rem;">Ready</div>
+                <div class="small" style="margin-top:10px;">initialising…</div>
               </div>
             </div>
             """,
             unsafe_allow_html=True,
         )
-        # Center the Streamlit button under the card
-        c1, c2, c3 = st.columns([1,2,1])
-        with c2:
-            if st.button("Load Dashboard", type="primary", use_container_width=True):
-                st.session_state["gate_done"] = True
-                st.rerun()
-        st.markdown("</div>", unsafe_allow_html=True)
-    st.stop()
+    time.sleep(2.0)
+    st.session_state["splash_done"] = True
+    st.rerun()
 
 # ─────────────────────────────────────────────────────────────
 # Caches & local fallback
