@@ -695,14 +695,14 @@ with tab3:
         wh_line   = next((l for l in lines if l.upper().startswith("PH_WH")),   "")
         mah_line  = next((l for l in lines if l.upper().startswith("PH_MAH")),  "")
         soci_line = next((l for l in lines if l.upper().startswith("PH_SOCI")), "")
-        socv_line = next((l for l in lines if l.upper().startswith("PH_SOCV")), "")
+        # We do not plot SoC_v in this tab.
+        # socv_line = next((l for l in lines if l.upper().startswith("PH_SOCV")), "")
 
         WH   = _parse_float_list(wh_line)
         mAh  = _parse_float_list(mah_line)
         SoCi = _parse_float_list(soci_line)
-        SoCv = _parse_float_list(socv_line)
 
-        L = max(len(WH), len(mAh), len(SoCi), len(SoCv))
+        L = max(len(WH), len(mAh), len(SoCi))
         if L == 0: return None
 
         def _pad_left(arr: List[float], n: int) -> List[float]:
@@ -711,18 +711,18 @@ with tab3:
         WH   = _pad_left(WH,   L)
         mAh  = _pad_left(mAh,  L)
         SoCi = _pad_left(SoCi, L)
-        SoCv = _pad_left(SoCv, L)
 
-        # Build time axis: last element corresponds to head_dt
+        # Build time axis: last element corresponds to head_dt.
+        # If arrays represent hourly samples (typical), this creates 1 h spacing.
         times = [head_dt - timedelta(hours=(L-1 - i)) for i in range(L)]
-        df = pd.DataFrame({"t": times, "PH_WH": WH, "PH_mAh": mAh, "PH_SoCi": SoCi, "PH_SoCv": SoCv})
+        df = pd.DataFrame({"t": times, "PH_WH": WH, "PH_mAh": mAh, "PH_SoCi": SoCi})
         return df
 
     @st.cache_data(show_spinner=True)
-    def build_power_timeseries(folder_id: str, latest_n: int = 7) -> pd.DataFrame:
+    def build_power_timeseries(folder_id: str, latest_n: int = 3) -> pd.DataFrame:
         files = list_power_logs(folder_id)
         if not files:
-            return pd.DataFrame(columns=["t","PH_WH","PH_mAh","PH_SoCi","PH_SoCv"])
+            return pd.DataFrame(columns=["t","PH_WH","PH_mAh","PH_SoCi"])
         frames: List[pd.DataFrame] = []
         for meta in files[:max(1, latest_n)]:
             local = ensure_log_cached(meta)
@@ -730,18 +730,31 @@ with tab3:
             if df is not None and not df.empty:
                 frames.append(df)
         if not frames:
-            return pd.DataFrame(columns=["t","PH_WH","PH_mAh","PH_SoCi","PH_SoCv"])
+            return pd.DataFrame(columns=["t","PH_WH","PH_mAh","PH_SoCi"])
         merged = pd.concat(frames, ignore_index=True)
         merged.sort_values("t", inplace=True)
         merged = merged.drop_duplicates(subset=["t"], keep="last")
         merged.reset_index(drop=True, inplace=True)
         return merged
 
-    cols = st.columns([2,1])
-    with cols[0]:
-        lookback = st.number_input("How many latest logs to stitch", min_value=3, max_value=50, value=7, step=1, key="tab3_lookback")
-    with cols[1]:
-        pass
+    def compute_power_from_energy(df: pd.DataFrame) -> pd.Series:
+        """Return instantaneous power (W) from Energy (Wh) via time derivative:
+           P = d(Wh)/dt_hours. Uses actual time deltas between samples."""
+        if df.empty or "PH_WH" not in df or "t" not in df:
+            return pd.Series(dtype=float)
+        dWh = df["PH_WH"].astype(float).diff()
+        dt_h = df["t"].astype("datetime64[ns]").diff().dt.total_seconds() / 3600.0
+        P = dWh / dt_h
+        # First point NaN → forward fill for plot continuity; drop remaining NaNs
+        P.iloc[0] = np.nan
+        return P
+
+    # UI controls
+    left, right = st.columns([2,1])
+    with left:
+        lookback = st.number_input("How many latest logs to stitch", min_value=3, max_value=50, value=3, step=1, key="tab3_lookback")
+    with right:
+        plot_power = st.checkbox("Plot Power (W) instead of Energy (Wh)", value=True, help="Power is computed from the time-derivative of Energy (Wh).")
 
     if st.button("Show results", type="primary", key="tab3_show_btn"):
         with st.spinner("Building power time-series…"):
@@ -750,28 +763,66 @@ with tab3:
         if ts.empty:
             st.warning("No parsable power logs found.")
         else:
+            # Colors (match trace & its axis)
+            soc_color = "#2563eb"   # blue for SoC_i (%)
+            rhs_color = "#16a34a"   # green for Power/Wh
+
+            # Decide RHS series
+            if plot_power:
+                ts = ts.copy()
+                ts["Power_W"] = compute_power_from_energy(ts)
+                # Optionally, you can smooth if needed:
+                # ts["Power_W"] = ts["Power_W"].rolling(3, min_periods=1, center=True).median()
+                rhs_series = ("Power (W)", "Power_W")
+            else:
+                rhs_series = ("Energy (Wh)", "PH_WH")
+
             fig = go.Figure()
+
             # SoC_i (%) on y1
             fig.add_trace(go.Scatter(
-                x=ts["t"], y=ts["PH_SoCi"], mode="lines", name="SoC_i (%)", yaxis="y1"
+                x=ts["t"], y=ts["PH_SoCi"], mode="lines",
+                name="SoC_i (%)", yaxis="y1", line=dict(color=soc_color)
             ))
-            # Wh on y2
+
+            # RHS: Power (W) or Energy (Wh) on y2
             fig.add_trace(go.Scatter(
-                x=ts["t"], y=ts["PH_WH"], mode="lines", name="Energy (Wh)", yaxis="y2"
+                x=ts["t"], y=ts[rhs_series[1]], mode="lines",
+                name=rhs_series[0], yaxis="y2", line=dict(color=rhs_color)
             ))
 
             fig.update_layout(
                 title="Power / State of Charge over time",
                 xaxis=dict(title="Time"),
-                yaxis=dict(title="SoC (%)", rangemode="tozero"),
-                yaxis2=dict(title="Wh", overlaying="y", side="right"),
+                yaxis=dict(
+                    title="SoC_i (%)",
+                    rangemode="tozero",
+                    titlefont=dict(color=soc_color),
+                    tickfont=dict(color=soc_color),
+                ),
+                yaxis2=dict(
+                    title=rhs_series[0],
+                    overlaying="y",
+                    side="right",
+                    titlefont=dict(color=rhs_color),
+                    tickfont=dict(color=rhs_color),
+                ),
                 legend=dict(orientation="h"),
                 margin=dict(l=10, r=10, t=50, b=10),
             )
             st.plotly_chart(fig, use_container_width=True)
 
             # Quick last-point indicators
-            last = ts.iloc[-1]
+            last = ts.dropna(subset=[rhs_series[1], "PH_SoCi"]).iloc[-1]
             c1, c2 = st.columns(2)
             with c1: st.metric("Last SoC_i (%)", f"{last['PH_SoCi']:.1f}")
-            with c2: st.metric("Last Energy (Wh)", f"{last['PH_WH']:.2f}")
+            with c2: st.metric(
+                f"Last {rhs_series[0]}",
+                f"{last[rhs_series[1]]:.2f}"
+            )
+
+            st.caption(
+                "Notes: Right-hand series shows "
+                f"**{rhs_series[0]}**. When plotting **Power (W)**, it is computed as the time derivative "
+                "of **Energy (Wh)** using actual time deltas between samples (W = dWh/dt)."
+            )
