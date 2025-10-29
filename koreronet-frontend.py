@@ -1,28 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-KōreroNET Dashboard — Google Drive edition (optimized UX)
+KōreroNET Dashboard — Google Drive edition (masters inside snapshot root or subfolders)
 
-Highlights
-----------
-• Tab 1 (Detections): same heatmap logic, but with a centered status overlay during
-  "list → download → index". Status vanishes; controls appear cleanly.
-• Tab 2 (Verify): FAST. Only reads master CSVs inside each snapshot folder:
-    Backup/<YYYYMMDD_HHMMSS>/
-        koreronet/koreronet_detections_all.csv
-        birdnet/birdnet_detections_all.csv
-  Builds an available-dates index from WAV basenames + Start seconds.
-  Day picker is a selectbox of *only available* dates. Species list by frequency.
-  Chunks are reconstructed and fetched on-demand from Drive.
-• Tab 3 (Drive): quick top-level listing.
-
-Secrets required
-----------------
-GDRIVE_FOLDER_ID = "..."
-[service_account]  (or SERVICE_ACCOUNT_JSON string)
+What’s new vs previous:
+• Master CSVs are discovered flexibly inside each snapshot (root OR subfolders), case-insensitive.
+• Chunk folders are discovered by name contains("koreronet"/"birdnet"); fallback to snapshot root if absent.
+• Everything else stays fast: no crawling per-file CSVs; only the two masters per snapshot are read.
 """
 
-import os, io, re, glob, json, shutil
+import os, io, re, glob, json
 from pathlib import Path
 from datetime import date, datetime, timedelta
 from typing import Dict, Any, List, Optional, Tuple
@@ -107,7 +94,7 @@ def list_children(folder_id: str, max_items: int = 2000) -> List[Dict[str, Any]]
         if page_size <= 0: break
         resp = drive.files().list(
             q=f"'{folder_id}' in parents and trashed=false",
-            fields="nextPageToken, files(id,name,mimeType,modifiedTime,size,md5Checksum,parents)",
+            fields=("nextPageToken, files(id,name,mimeType,modifiedTime,size,md5Checksum,parents)"),
             pageSize=page_size,
             pageToken=token,
             orderBy="folder,name_natural",
@@ -119,12 +106,6 @@ def list_children(folder_id: str, max_items: int = 2000) -> List[Dict[str, Any]]
         token = resp.get("nextPageToken")
         if not token: break
     return items
-
-def find_child_folder_by_name(parent_id: str, name: str) -> Optional[Dict[str, Any]]:
-    for k in list_children(parent_id, max_items=2000):
-        if k.get("mimeType") == "application/vnd.google-apps.folder" and k.get("name") == name:
-            return k
-    return None
 
 def download_to(path: Path, file_id: str) -> Path:
     from googleapiclient.http import MediaIoBaseDownload
@@ -147,7 +128,7 @@ def ensure_chunk_cached(chunk_name: str, folder_id: str, subdir: str) -> Optiona
     local_path = CHUNK_CACHE / subdir / chunk_name
     if local_path.exists():
         return local_path
-    # Look up by exact name in the folder
+    # look up by exact name (only in given folder)
     for k in list_children(folder_id, max_items=2000):
         if k.get("name") == chunk_name:
             try:
@@ -247,9 +228,9 @@ def load_csv(path: str | Path) -> pd.DataFrame:
     return pd.read_csv(str(path))
 
 # ─────────────────────────────────────────────────────────────
-# Tab 2 helpers — MASTER CSV INDEX (FAST)
+# Tab 2 helpers — MASTER CSV INDEX (FLEXIBLE)
 # ─────────────────────────────────────────────────────────────
-SNAP_RE = re.compile(r"^(\d{8})_(\d{6})$")
+SNAP_RE = re.compile(r"^(\d{8})_(\d{6})$", re.IGNORECASE)
 
 def _sanitize_label(s: str) -> str:
     s = str(s or "")
@@ -257,8 +238,6 @@ def _sanitize_label(s: str) -> str:
     return s
 
 def _compose_chunk_name(kind: str, wav_base: str, start: float, end: float, label: str, conf: float) -> str:
-    # 19700102_011820__bn_000.00_005.00__Great_Bittern__p0.71.wav
-    # 19700102_013422__kn_015.00_020.00__House_Sparrow__p0.77.wav
     root = Path(wav_base).stem  # 19700102_011820
     start_s = f"{float(start):06.2f}"
     end_s   = f"{float(end):06.2f}"
@@ -268,37 +247,74 @@ def _compose_chunk_name(kind: str, wav_base: str, start: float, end: float, labe
     return f"{root}__{tag}_{start_s}_{end_s}__{lab}__p{pc}.wav"
 
 def _parse_dt_from_wav(wav_base: str) -> Optional[datetime]:
-    # WAV base like 19700102_020425.WAV → datetime
     base = os.path.basename(wav_base)
     m = re.match(r"^(\d{8})_(\d{6})", base)
     if not m: return None
     return datetime.strptime(m.group(1)+m.group(2), "%Y%m%d%H%M%S")
 
-@st.cache_data(show_spinner=False)
+def _find_chunk_folders(snapshot_id: str) -> Dict[str, str]:
+    """Return {'KN': folder_id_or_snapshot, 'BN': folder_id_or_snapshot}."""
+    kids = list_children(snapshot_id, max_items=2000)
+    kn = [k for k in kids if k.get("mimeType")=="application/vnd.google-apps.folder" and "koreronet" in k.get("name","").lower()]
+    bn = [k for k in kids if k.get("mimeType")=="application/vnd.google-apps.folder" and "birdnet"   in k.get("name","").lower()]
+    out = {}
+    out["KN"] = (kn[0]["id"] if kn else snapshot_id)
+    out["BN"] = (bn[0]["id"] if bn else snapshot_id)
+    return out
+
+def _match_master_name(name: str, kind: str) -> bool:
+    n = name.lower()
+    if kind == "KN":
+        return (("koreronet" in n) and ("detect" in n) and n.endswith(".csv"))
+    else:
+        return (("birdnet" in n) and ("detect" in n) and n.endswith(".csv"))
+
+def _find_master_csv_meta_anywhere(snapshot_id: str, kind: str) -> Optional[Dict[str, Any]]:
+    """
+    Search master CSV inside snapshot root first; if not found, search one level down in subfolders.
+    Match is case-insensitive and flexible (e.g., 'koreronet_detections_all.csv', 'koreronet_detections.csv').
+    """
+    # 1) root
+    root_kids = list_children(snapshot_id, max_items=2000)
+    root_files = [f for f in root_kids if f.get("mimeType") != "application/vnd.google-apps.folder"]
+    candidates = [f for f in root_files if _match_master_name(f.get("name",""), kind)]
+    if candidates:
+        # choose newest by modifiedTime if available
+        candidates.sort(key=lambda m: m.get("modifiedTime",""), reverse=True)
+        meta = dict(candidates[0])
+        return meta
+
+    # 2) one-level subfolders
+    subfolders = [f for f in root_kids if f.get("mimeType") == "application/vnd.google-apps.folder"]
+    for sf in subfolders:
+        sub_files = list_children(sf["id"], max_items=2000)
+        sub_files = [f for f in sub_files if f.get("mimeType") != "application/vnd.google-apps.folder"]
+        cands = [f for f in sub_files if _match_master_name(f.get("name",""), kind)]
+        if cands:
+            cands.sort(key=lambda m: m.get("modifiedTime",""), reverse=True)
+            meta = dict(cands[0])
+            return meta
+
+    return None
+
+@st.cache_data(show_spinner=True)
 def list_snapshots_drive(root_folder_id: str) -> List[Dict[str, Any]]:
-    backup = find_child_folder_by_name(root_folder_id, "Backup")
+    # find Backup (case-insensitive)
+    kids = list_children(root_folder_id, max_items=2000)
+    backup = None
+    for k in kids:
+        if k.get("mimeType") == "application/vnd.google-apps.folder" and k.get("name","").lower() == "backup":
+            backup = k; break
     if not backup: return []
-    kids = list_children(backup["id"], max_items=2000)
-    snaps = [k for k in kids if k.get("mimeType")=="application/vnd.google-apps.folder" and SNAP_RE.match(k.get("name",""))]
+    snaps = [k for k in list_children(backup["id"], max_items=2000)
+             if k.get("mimeType")=="application/vnd.google-apps.folder" and SNAP_RE.match(k.get("name",""))]
     snaps.sort(key=lambda m: m.get("name",""), reverse=True)
     return snaps
-
-def _find_master_csv_meta(snapshot_id: str, subdir: str, filename: str) -> Optional[Dict[str,Any]]:
-    # subdir = "koreronet" | "birdnet"
-    kids = list_children(snapshot_id, max_items=2000)
-    sub = [k for k in kids if k.get("mimeType")=="application/vnd.google-apps.folder" and k.get("name")==subdir]
-    if not sub: return None
-    sub_id = sub[0]["id"]
-    files = [f for f in list_children(sub_id, max_items=2000) if f.get("name")==filename]
-    if not files: return None
-    meta = files[0]
-    meta["_chunks_folder_id"] = sub_id
-    return meta
 
 @st.cache_data(show_spinner=True)
 def build_master_index(folder_id: str) -> pd.DataFrame:
     """
-    Reads ONLY master CSVs from each snapshot and returns a flat DataFrame with:
+    Reads master CSVs (found flexibly) from each snapshot and returns:
     ['Date','Time','ActualTime','Kind','Label','Confidence','Start','End','WavBase',
      'ChunkName','ChunkDriveFolderId','SnapId']
     """
@@ -306,13 +322,14 @@ def build_master_index(folder_id: str) -> pd.DataFrame:
     snaps = list_snapshots_drive(folder_id)
     for sn in snaps:
         snap_id = sn["id"]
-        # KN master
-        kn_meta = _find_master_csv_meta(snap_id, "koreronet", "koreronet_detections_all.csv")
+        chunk_dirs = _find_chunk_folders(snap_id)  # may fallback to snapshot root
+
+        # KN (koreronet) master
+        kn_meta = _find_master_csv_meta_anywhere(snap_id, kind="KN")
         if kn_meta:
             kn_csv = ensure_csv_cached(kn_meta, subdir=f"snap_{snap_id}/koreronet")
             try:
                 df = pd.read_csv(kn_csv)
-                # Expect columns: Start, End, Label, Confidence, File
                 for _, r in df.iterrows():
                     wav = str(r.get("File",""))
                     t0 = _parse_dt_from_wav(wav)
@@ -333,18 +350,18 @@ def build_master_index(folder_id: str) -> pd.DataFrame:
                         "End": end,
                         "WavBase": os.path.basename(wav),
                         "ChunkName": _compose_chunk_name("kn", wav, start, end, lab, conf),
-                        "ChunkDriveFolderId": kn_meta["_chunks_folder_id"],
+                        "ChunkDriveFolderId": chunk_dirs["KN"],
                         "SnapId": snap_id,
                     })
             except Exception:
                 pass
-        # BN master
-        bn_meta = _find_master_csv_meta(snap_id, "birdnet", "birdnet_detections_all.csv")
+
+        # BN (birdnet) master
+        bn_meta = _find_master_csv_meta_anywhere(snap_id, kind="BN")
         if bn_meta:
             bn_csv = ensure_csv_cached(bn_meta, subdir=f"snap_{snap_id}/birdnet")
             try:
                 df = pd.read_csv(bn_csv)
-                # Expect columns: Start (s), End (s), Scientific name, Common name, Confidence, File
                 for _, r in df.iterrows():
                     wav = str(r.get("File",""))
                     t0 = _parse_dt_from_wav(os.path.basename(wav))
@@ -365,7 +382,7 @@ def build_master_index(folder_id: str) -> pd.DataFrame:
                         "End": end,
                         "WavBase": os.path.basename(wav),
                         "ChunkName": _compose_chunk_name("bn", wav, start, end, lab, conf),
-                        "ChunkDriveFolderId": bn_meta["_chunks_folder_id"],
+                        "ChunkDriveFolderId": chunk_dirs["BN"],
                         "SnapId": snap_id,
                     })
             except Exception:
@@ -392,15 +409,13 @@ tab1, tab_verify, tab3 = st.tabs(["📊 Detections", "🎧 Verify recordings", "
 with tab1:
     center = st.empty()
     with center.container():
-        st.markdown('<div class="center-wrap fade"><div>🔎 Checking root CSVs on Drive…</div></div>', unsafe_allow_html=True)
+        st.markdown('<div class="center-wrap fade"><div>🔎 Checking root CSVs…</div></div>', unsafe_allow_html=True)
 
-    # Stage 1: list
     if DRIVE_ENABLED:
         bn_meta, kn_meta = list_csvs_drive_root(GDRIVE_FOLDER_ID)
     else:
         bn_meta, kn_meta = [], []
 
-    # Stage 2: download (Drive) or fallback local
     if DRIVE_ENABLED and (bn_meta or kn_meta):
         center.empty(); center = st.empty()
         with center.container():
@@ -408,12 +423,10 @@ with tab1:
         bn_paths = [ensure_csv_cached(m, subdir="root/bn") for m in bn_meta]
         kn_paths = [ensure_csv_cached(m, subdir="root/kn") for m in kn_meta]
     else:
-        # fallback to local
         bn_local, kn_local = list_csvs_local(ROOT_LOCAL)
         bn_paths = [Path(p) for p in bn_local]
         kn_paths = [Path(p) for p in kn_local]
 
-    # Stage 3: index
     center.empty(); center = st.empty()
     with center.container():
         st.markdown('<div class="center-wrap fade"><div>🧮 Building date index…</div></div>', unsafe_allow_html=True)
@@ -421,12 +434,12 @@ with tab1:
     bn_by_date = build_date_index(bn_paths) if bn_paths else {}
     kn_by_date = build_date_index(kn_paths) if kn_paths else {}
 
-    center.empty()  # remove overlay; show controls
+    center.empty()
     bn_dates = sorted(bn_by_date.keys())
     kn_dates = sorted(kn_by_date.keys())
     paired_dates = sorted(set(bn_dates).intersection(set(kn_dates)))
 
-    src = st.selectbox("Source", ["KōreroNET (kn)", "BirdNET (bn)", "Combined"], index=0, help="Choose which detections to visualize.")
+    src = st.selectbox("Source", ["KōreroNET (kn)", "BirdNET (bn)", "Combined"], index=0)
     min_conf = st.slider("Minimum confidence", 0.0, 1.0, 0.90, 0.01)
 
     if src == "Combined":
@@ -439,7 +452,6 @@ with tab1:
     if not options:
         st.warning(f"No available dates for {src}."); st.stop()
 
-    # “Calendar” limited to available days → use selectbox of exact dates
     d = st.selectbox("Day", options=options, index=len(options)-1, format_func=lambda dt: dt.isoformat(), help=help_txt)
 
     def load_and_filter(paths: List[Path], kind: str, day_selected: date):
@@ -471,7 +483,6 @@ with tab_verify:
     if not DRIVE_ENABLED:
         st.error("Google Drive is not configured in secrets."); st.stop()
 
-    # Build (or load) the global master index once
     center2 = st.empty()
     with center2.container():
         st.markdown('<div class="center-wrap fade"><div>📚 Indexing master CSVs across snapshots…</div></div>', unsafe_allow_html=True)
@@ -479,24 +490,22 @@ with tab_verify:
     center2.empty()
 
     if master.empty:
-        st.warning("No master CSVs found in any snapshot (koreronet_detections_all.csv / birdnet_detections_all.csv).")
+        st.warning("No master CSVs found in any snapshot (searched root and one-level subfolders).")
         st.stop()
 
-    # Controls (minimal)
     colA, colB = st.columns([2,1])
     with colA:
         src_mode_v = st.selectbox("Source", ["KōreroNET (KN)", "BirdNET (BN)", "Combined"], index=0)
     with colB:
         min_conf_v = st.slider("Min confidence", 0.0, 1.0, 0.90, 0.01)
 
-    # Restrict to available days via selectbox (no invalid picks)
+    # Filter pool by source + confidence
     if src_mode_v == "KōreroNET (KN)":
         pool = master[master["Kind"]=="KN"]
     elif src_mode_v == "BirdNET (BN)":
         pool = master[master["Kind"]=="BN"]
     else:
         pool = master
-
     pool = pool[pd.to_numeric(pool["Confidence"], errors="coerce") >= float(min_conf_v)]
     if pool.empty:
         st.info("No rows above the selected confidence."); st.stop()
@@ -508,7 +517,6 @@ with tab_verify:
     if day_df.empty:
         st.warning("No detections for the chosen day."); st.stop()
 
-    # Species list
     counts = day_df.groupby("Label").size().sort_values(ascending=False)
     species = st.selectbox(
         "Species",
@@ -538,7 +546,6 @@ with tab_verify:
     row = playlist.iloc[idx]
     st.markdown(f"**Confidence:** {float(row['Confidence']):.3f}  |  **Time:** {row['ActualTime']}")
 
-    # On-demand audio fetch using reconstructed chunk filename
     def _play_audio(row: pd.Series, auto: bool):
         chunk_name = str(row.get("ChunkName","") or "")
         folder_id  = str(row.get("ChunkDriveFolderId","") or "")
