@@ -1,4 +1,4 @@
-# app.py (or Visualise.py)
+# app.py (or Visualise.py) — with Drive Diagnostics
 
 import os, glob, re, json, io
 from pathlib import Path
@@ -33,10 +33,17 @@ SERVICE_ACCOUNT_JSON = st.secrets.get("SERVICE_ACCOUNT_JSON")
 CACHE_ROOT = Path("/tmp/gdrive_cache")   # ephemeral on Streamlit Cloud
 CACHE_ROOT.mkdir(parents=True, exist_ok=True)
 
+# Will fill these in below
 drive = None
 gdrive_enabled = False
 gdrive_err = None
+sa_email = None
+sa_project = None
+sa_key_id = None
 
+# ---------------------------------------------------------
+# Attempt auth/build Drive client
+# ---------------------------------------------------------
 if GDRIVE_FOLDER_ID and SERVICE_ACCOUNT_JSON:
     try:
         from google.oauth2 import service_account
@@ -44,10 +51,14 @@ if GDRIVE_FOLDER_ID and SERVICE_ACCOUNT_JSON:
         from googleapiclient.http import MediaIoBaseDownload
         from googleapiclient.errors import HttpError
 
-        # secrets may be a dict already (when set via TOML) or a string
+        # Secrets may be a dict (Streamlit TOML parsed it) or a str
         sa_info = SERVICE_ACCOUNT_JSON
         if isinstance(sa_info, str):
             sa_info = json.loads(sa_info)
+
+        sa_email = sa_info.get("client_email")
+        sa_project = sa_info.get("project_id")
+        sa_key_id = sa_info.get("private_key_id")
 
         creds = service_account.Credentials.from_service_account_info(
             sa_info,
@@ -58,6 +69,11 @@ if GDRIVE_FOLDER_ID and SERVICE_ACCOUNT_JSON:
         gdrive_enabled = True
     except Exception as e:
         gdrive_err = f"{type(e).__name__}: {e}"
+else:
+    if not GDRIVE_FOLDER_ID:
+        gdrive_err = "Missing GDRIVE_FOLDER_ID in Streamlit secrets."
+    elif not SERVICE_ACCOUNT_JSON:
+        gdrive_err = "Missing SERVICE_ACCOUNT_JSON in Streamlit secrets."
 
 # ---------------------------------------------------------
 # Drive helpers
@@ -65,9 +81,9 @@ if GDRIVE_FOLDER_ID and SERVICE_ACCOUNT_JSON:
 if gdrive_enabled:
     @st.cache_data(show_spinner=False, ttl=300)
     def list_children(folder_id: str):
-        """List *direct* children of a folder."""
+        """List direct children of a folder (supports My Drive & Shared Drives)."""
         items, token = [], None
-        fields = "nextPageToken, files(id, name, mimeType, modifiedTime, md5Checksum)"
+        fields = "nextPageToken, files(id, name, mimeType, modifiedTime, md5Checksum, parents, driveId)"
         q = f"'{folder_id}' in parents and trashed=false"
         while True:
             resp = drive.files().list(
@@ -138,20 +154,19 @@ if gdrive_enabled:
         return count
 
 # ---------------------------------------------------------
-# Choose data roots
+# Choose data roots (Drive cache if available)
 # ---------------------------------------------------------
 if gdrive_enabled:
     try:
-        downloaded = sync_csvs_recursive(GDRIVE_FOLDER_ID)
+        _ = sync_csvs_recursive(GDRIVE_FOLDER_ID)
     except Exception as e:
         gdrive_err = f"Sync error: {type(e).__name__}: {e}"
         gdrive_enabled = False
 
 if gdrive_enabled:
     ROOT = str(CACHE_ROOT)
-    BACKUP_ROOT = str(CACHE_ROOT / "Backup")  # may not exist; Tab 2 will handle empty
+    BACKUP_ROOT = str(CACHE_ROOT / "Backup")
 else:
-    # fallback for local dev
     DEFAULT_ROOT = r"G:\My Drive\From the node"
     BACKUP_ROOT_DEFAULT = r"G:\My Drive\From the node\Backup"
     ROOT = os.environ.get("KORERONET_DATA_ROOT", DEFAULT_ROOT)
@@ -160,11 +175,11 @@ else:
 # Status banner
 st.info(
     f"Data source: {'Google Drive cache (/tmp/gdrive_cache)' if gdrive_enabled else ROOT}"
-    + (f"  •  Warning: {gdrive_err}" if gdrive_err else "")
+    + (f"  •  Note: {gdrive_err}" if gdrive_err else "")
 )
 
 # ---------------------------------------------------------
-# CSV discovery
+# CSV discovery / parsing
 # ---------------------------------------------------------
 @st.cache_data(show_spinner=False)
 def list_csvs(root: str):
@@ -172,7 +187,6 @@ def list_csvs(root: str):
     kn_paths = sorted(glob.glob(os.path.join(root, "kn*.csv")))
     return bn_paths, kn_paths
 
-# Index ALL dates present inside each CSV (robust to DD/MM/YYYY)
 @st.cache_data(show_spinner=False)
 def extract_dates_from_csv(path: str):
     dates = set()
@@ -234,7 +248,6 @@ def make_heatmap(df: pd.DataFrame, min_conf: float, title: str):
     hour_labels_map = {h: f"{(h % 12) or 12} {'AM' if h < 12 else 'PM'}" for h in range(24)}
     hour_order = [hour_labels_map[h] for h in range(24)]
     df_f["HourLabel"] = df_f["Hour"].map(hour_labels_map)
-
     pivot = (df_f.groupby(["Label", "HourLabel"]).size().unstack(fill_value=0).astype(int))
 
     for lbl in hour_order:
@@ -244,10 +257,6 @@ def make_heatmap(df: pd.DataFrame, min_conf: float, title: str):
 
     totals = pivot.sum(axis=1)
     pivot = pivot.loc[totals.sort_values(ascending=False).index]
-
-    if pivot.empty:
-        st.warning("No data to plot.")
-        return
 
     fig = px.imshow(
         pivot.values,
@@ -342,7 +351,7 @@ def _std_verify(df: pd.DataFrame) -> pd.DataFrame:
 # TABS
 # ---------------------------------------------------------
 st.title("KōreroNET • Daily Dashboard")
-tab1, tab_verify, tab_drive = st.tabs(["📊 Detections", "🎧 Verify recordings", "📂 Drive Browser"])
+tab1, tab_verify, tab_diag = st.tabs(["📊 Detections", "🎧 Verify recordings", "🧪 Drive Diagnostics"])
 
 # -------------------------
 # TAB 1 — detections
@@ -487,7 +496,6 @@ with tab_verify:
         prog.progress(1.0)
         return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
-    # LOAD button
     if st.button("Load detections", type="primary"):
         csv_list, err = _gather_csvs(snapshot_path, src_mode_v)
         if err:
@@ -512,7 +520,6 @@ with tab_verify:
     if std_v.empty:
         st.warning("No detections after filtering."); st.stop()
 
-    # Calendar filter on Tab 2
     avail_days = sorted(std_v["ActualTime"].dt.date.unique())
     day_default = avail_days[-1]
     day_pick = st.date_input("Day", value=day_default, min_value=avail_days[0], max_value=avail_days[-1],
@@ -525,7 +532,6 @@ with tab_verify:
     if std_day.empty:
         st.warning("No detections for the chosen day."); st.stop()
 
-    # Species list (sorted by count) for the chosen day
     counts = std_day.groupby("Label").size().sort_values(ascending=False)
     species = st.selectbox(
         "Species",
@@ -535,17 +541,14 @@ with tab_verify:
         key=f"verify_species::{day_pick.isoformat()}",
     )
 
-    # Build playlist for selected species & day
     playlist = std_day[std_day["Label"] == species].sort_values("ActualTime").reset_index(drop=True)
     if playlist.empty:
         st.info("No chunks for this species on the chosen day."); st.stop()
 
-    # Index key tied to context (snapshot + source + day + species)
     idx_key = f"v_idx::{snap_name}::{src_mode_v}::{day_pick.isoformat()}::{species}"
     if idx_key not in st.session_state: st.session_state[idx_key] = 0
     idx = st.session_state[idx_key] % len(playlist)
 
-    # Prev / Play / Next (Prev/Next autoplays)
     col1, col2, col3, col4 = st.columns([1,1,1,5])
     autoplay = False
     with col1:
@@ -566,12 +569,12 @@ with tab_verify:
             f"Segment: {float(row['Start_s']):.2f}–{float(row['End_s']):.2f}s")
     st.markdown(meta)
 
-    # Audio player
     def _play_audio(filepath: str, auto: bool):
         try:
             with open(filepath, "rb") as f:
                 data = f.read()
             if auto:
+                import base64
                 b64 = base64.b64encode(data).decode()
                 st.markdown(f'<audio controls autoplay src="data:audio/wav;base64,{b64}"></audio>',
                             unsafe_allow_html=True)
@@ -583,49 +586,115 @@ with tab_verify:
     _play_audio(row["ChunkPath"], autoplay)
 
 # -------------------------
-# TAB 3 — Drive Browser
+# TAB 3 — Drive Diagnostics
 # -------------------------
-with tab_drive:
-    st.subheader("Google Drive Browser")
-    if not gdrive_enabled:
-        st.error("Drive is not configured or failed to authenticate.")
-        if gdrive_err:
-            st.code(gdrive_err)
-        st.stop()
+with tab_diag:
+    st.subheader("Google Drive Diagnostics")
 
-    st.caption(f"Root folder ID: {GDRIVE_FOLDER_ID}")
+    diag = {
+        "has_GDRIVE_FOLDER_ID": bool(GDRIVE_FOLDER_ID),
+        "has_SERVICE_ACCOUNT_JSON": bool(SERVICE_ACCOUNT_JSON),
+        "sa_client_email": sa_email,
+        "sa_project_id": sa_project,
+        "sa_private_key_id_tail": (sa_key_id[-6:] if sa_key_id else None),
+        "build_client_ok": gdrive_enabled and (gdrive_err is None),
+        "build_client_error": gdrive_err,
+        "folder_id": GDRIVE_FOLDER_ID,
+    }
 
-    # Controls
-    colA, colB = st.columns([1,1])
-    with colA:
-        refresh = st.button("🔄 Resync CSVs (bn*/kn*) to cache")
-    with colB:
-        show_json = st.checkbox("Show raw JSON list", value=False)
-
-    if refresh:
+    # Step 1: about().get() — proves auth works
+    about_ok = False
+    about_err = None
+    about_user = None
+    if gdrive_enabled:
         try:
-            downloaded_now = sync_csvs_recursive(GDRIVE_FOLDER_ID)
-            st.success(f"Synced. New files downloaded: {downloaded_now}. Cache: {CACHE_ROOT}")
+            about = drive.about().get(fields="user, kind").execute()
+            about_ok = True
+            about_user = about.get("user", {})
         except Exception as e:
-            st.error(f"Sync error: {type(e).__name__}: {e}")
+            about_err = f"{type(e).__name__}: {e}"
+    diag["about_ok"] = about_ok
+    diag["about_error"] = about_err
+    diag["about_user"] = about_user
 
-    tree = list_tree_recursive(GDRIVE_FOLDER_ID)
-    # Simple tree rendering
-    lines = []
-    for path, it in tree:
-        is_folder = (it.get("mimeType","").endswith("folder"))
-        icon = "📁" if is_folder else "📄"
-        lines.append(f"{icon}  /{path}")
-    st.text("\n".join(lines[:2000]))  # safety cap
+    # Step 2: files().get on the folder ID — proves access to that folder
+    folder_ok = False
+    folder_err = None
+    folder_meta = None
+    if gdrive_enabled and GDRIVE_FOLDER_ID:
+        try:
+            folder_meta = drive.files().get(
+                fileId=GDRIVE_FOLDER_ID,
+                fields="id, name, mimeType, parents, driveId, capabilities, permissions",
+                supportsAllDrives=True,
+            ).execute()
+            folder_ok = True
+        except Exception as e:
+            folder_err = f"{type(e).__name__}: {e}"
+    diag["folder_get_ok"] = folder_ok
+    diag["folder_get_error"] = folder_err
+    diag["folder_meta"] = folder_meta
 
-    if show_json:
-        st.json(tree[:200])
+    # Step 3: list first 50 children (if folder ok)
+    list_ok = False
+    list_err = None
+    children_sample = []
+    if folder_ok:
+        try:
+            resp = drive.files().list(
+                q=f"'{GDRIVE_FOLDER_ID}' in parents and trashed=false",
+                fields="files(id, name, mimeType, driveId)",
+                pageSize=50,
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True,
+            ).execute()
+            children_sample = resp.get("files", [])
+            list_ok = True
+        except Exception as e:
+            list_err = f"{type(e).__name__}: {e}"
+    diag["list_children_ok"] = list_ok
+    diag["list_children_error"] = list_err
+    diag["children_sample"] = children_sample
 
-    # Also show what the app currently sees in the cache folder
-    st.markdown("**Cached CSVs (server):**")
+    # Step 4: cache check on server
     cached_bn = sorted(str(p) for p in CACHE_ROOT.glob("bn*.csv"))
     cached_kn = sorted(str(p) for p in CACHE_ROOT.glob("kn*.csv"))
-    if not cached_bn and not cached_kn:
-        st.info("No cached CSVs yet. Click **Resync** above.")
+    diag["cache_dir"] = str(CACHE_ROOT)
+    diag["cached_bn"] = cached_bn[:50]
+    diag["cached_kn"] = cached_kn[:50]
+
+    # Present summary + a copyable block
+    st.markdown("**Summary:**")
+    summary_lines = []
+    summary_lines.append(f"- Secrets present: GDRIVE_FOLDER_ID={bool(GDRIVE_FOLDER_ID)}, SERVICE_ACCOUNT_JSON={bool(SERVICE_ACCOUNT_JSON)}")
+    summary_lines.append(f"- Service account: {sa_email or 'None'} (project: {sa_project or 'None'})")
+    if gdrive_err:
+        summary_lines.append(f"- Build client: ❌ {gdrive_err}")
     else:
-        st.write({"bn": cached_bn, "kn": cached_kn})
+        summary_lines.append(f"- Build client: {'✅ OK' if gdrive_enabled else '❌ FAILED'}")
+    summary_lines.append(f"- about().get(): {'✅ OK' if about_ok else '❌ ' + (about_err or '')}")
+    if folder_meta:
+        mt = folder_meta.get('mimeType')
+        dn = folder_meta.get('name')
+        did = folder_meta.get('driveId')
+        summary_lines.append(f"- Folder access: ✅ name='{dn}', mimeType='{mt}', driveId='{did}'")
+    else:
+        summary_lines.append(f"- Folder access: {'✅' if folder_ok else '❌ ' + (folder_err or '')}")
+    summary_lines.append(f"- Children list: {'✅ ' + str(len(children_sample)) + ' items' if list_ok else '❌ ' + (list_err or '')}")
+    summary_lines.append(f"- Cached CSVs: bn={len(cached_bn)}, kn={len(cached_kn)} at {CACHE_ROOT}")
+
+    st.text("\n".join(summary_lines))
+
+    st.markdown("**Copy & paste this diagnostic for me:**")
+    st.code(json.dumps(diag, indent=2), language="json")
+
+    st.markdown("---")
+    st.caption("Common fixes:")
+    st.markdown(
+        "- Ensure the **folder** (and its parent **Shared Drive**, if applicable) is shared with "
+        f"**{sa_email or '[service account email]'}** (Viewer or higher).  \n"
+        "- If the folder is in a **Shared Drive**, item-level sharing may be blocked—add the service account to the **Shared Drive** members.  \n"
+        "- Double-check `GDRIVE_FOLDER_ID` is exactly the ID (the long string in the URL), not the URL itself.  \n"
+        "- In Google Cloud Console → **APIs & Services**, ensure **Google Drive API** is **Enabled** for the project "
+        f"**{sa_project or '[project]'}**."
+    )
