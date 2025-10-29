@@ -272,7 +272,7 @@ def _std_verify(df: pd.DataFrame) -> pd.DataFrame:
 
 # =========================================
 st.title("KōreroNET • Daily Dashboard")
-tab1, tab_verify, tab3 = st.tabs(["📊 Detections", "🎧 Verify recordings", "📁 Files (soon)"])
+tab1, tab_verify = st.tabs(["📊 Detections", "🎧 Verify recordings"])
 
 # -------------------------
 # TAB 1 — calendar + 0.90 default + strict per-day filter
@@ -512,8 +512,4 @@ with tab_verify:
 
     _play_audio(row["ChunkPath"], autoplay)
 
-# -------------------------
-# TAB 3 (placeholder)
-# -------------------------
-with tab3:
-    st.info("Files tab coming next.")
+
