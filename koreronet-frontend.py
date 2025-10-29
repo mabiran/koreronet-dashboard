@@ -625,41 +625,59 @@ with tab_verify:
 with tab3:
     st.subheader("Node Power History")
 
-    # ---- Guards ----
-    try:
-        _ = drive  # should exist from your Drive setup
-    except NameError:
-        st.error("Google Drive client not initialized in this app. Make sure the Drive setup code ran successfully.")
-        st.stop()
-
-    # Find "Power logs" folder under your Drive root
-    def _find_subfolder_by_name(root_id: str, name_ci: str):
-        kids = list_children(root_id, max_items=2000)
-        for k in kids:
-            if k.get("mimeType") == "application/vnd.google-apps.folder" and k.get("name","").lower() == name_ci.lower():
-                return k
-        return None
-
-    logs_folder = _find_subfolder_by_name(GDRIVE_FOLDER_ID, "Power logs")
-    if not logs_folder:
-        st.warning("Could not find a 'Power logs' folder under the Drive root.")
-        st.stop()
+    # If Google Drive client isn't available, fall back to local Power logs
+    USING_DRIVE = ("drive" in globals()) and (drive is not None)
+    if not USING_DRIVE:
+        st.warning("Google Drive client not initialized — using local 'Power logs' under ROOT.")
 
     LOG_RE = re.compile(r"^power_history_(\d{8})_(\d{6})\.log$", re.IGNORECASE)
 
-    @st.cache_data(show_spinner=True)
-    def _list_power_logs(folder_id: str):
-        kids = list_children(folder_id, max_items=2000)
-        files = [k for k in kids if k.get("mimeType") != "application/vnd.google-apps.folder" and LOG_RE.match(k.get("name",""))]
-        files.sort(key=lambda m: m.get("name",""), reverse=True)
-        return files
+    # --- list logs (Drive or local) ---
+    def _list_power_logs_drive():
+        # Find "Power logs" folder under your Drive root
+        kids = list_children(GDRIVE_FOLDER_ID, max_items=2000)
+        logs_folder = next(
+            (k for k in kids if k.get("mimeType") == "application/vnd.google-apps.folder"
+             and k.get("name","").lower() == "power logs"),
+            None
+        )
+        if not logs_folder:
+            return []
 
-    @st.cache_data(show_spinner=False)
-    def _ensure_log_cached(meta: dict) -> Path:
-        local_path = POWER_CACHE / meta["name"]  # POWER_CACHE should exist from earlier Drive setup
-        if not local_path.exists():
-            download_to(local_path, meta["id"])
-        return local_path
+        files = list_children(logs_folder["id"], max_items=2000)
+        files = [k for k in files if k.get("mimeType") != "application/vnd.google-apps.folder"
+                 and LOG_RE.match(k.get("name",""))]
+        files.sort(key=lambda m: m.get("name",""), reverse=True)
+        return files, logs_folder["id"]
+
+    def _list_power_logs_local():
+        power_dir = os.path.join(ROOT, "Power logs")
+        if not os.path.isdir(power_dir):
+            return [], power_dir
+        files = [f for f in os.listdir(power_dir) if LOG_RE.match(f)]
+        files.sort(reverse=True)
+        # normalize to same structure as Drive
+        metas = [{"name": fn, "id": os.path.join(power_dir, fn)} for fn in files]
+        return metas, power_dir
+
+    if USING_DRIVE:
+        log_metas, base_loc = _list_power_logs_drive()
+    else:
+        log_metas, base_loc = _list_power_logs_local()
+
+    # --- UI: default 3 latest logs ---
+    lookback = st.number_input("How many latest logs to stitch", min_value=1, max_value=50, value=3, step=1, key="tab3_lookback")
+
+    # --- read file (Drive or local) ---
+    def _ensure_log_local(meta):
+        """Returns a local path to the log file (downloads if on Drive)."""
+        if USING_DRIVE:
+            local_path = POWER_CACHE / meta["name"]  # POWER_CACHE exists from Drive setup; if not using Drive we won’t touch it
+            if not local_path.exists():
+                download_to(local_path, meta["id"])
+            return str(local_path)
+        else:
+            return meta["id"]  # already a local path
 
     def _parse_float_list(line: str):
         try:
@@ -675,9 +693,9 @@ with tab3:
                 vals.append(np.nan)
         return vals
 
-    def _parse_power_log(path: Path) -> pd.DataFrame | None:
+    def _parse_power_log(path: str) -> pd.DataFrame | None:
         try:
-            text = path.read_text(encoding="utf-8", errors="ignore")
+            text = open(path, "r", encoding="utf-8", errors="ignore").read()
         except Exception:
             return None
         lines = [l.strip() for l in text.splitlines() if l.strip()]
@@ -701,14 +719,12 @@ with tab3:
             return None
 
         wh_line   = next((l for l in lines if l.upper().startswith("PH_WH")),   "")
-        mah_line  = next((l for l in lines if l.upper().startswith("PH_MAH")),  "")
         soci_line = next((l for l in lines if l.upper().startswith("PH_SOCI")), "")
 
         WH   = _parse_float_list(wh_line)
-        mAh  = _parse_float_list(mah_line)
         SoCi = _parse_float_list(soci_line)
 
-        L = max(len(WH), len(mAh), len(SoCi))
+        L = max(len(WH), len(SoCi))
         if L == 0:
             return None
 
@@ -719,110 +735,50 @@ with tab3:
             return a[:n]
 
         WH   = _pad(WH,   L)
-        mAh  = _pad(mAh,  L)
         SoCi = _pad(SoCi, L)
 
-        # Build time axis assuming evenly spaced 1-hour samples,
-        # with the LAST element aligned to head_dt from the file.
+        # Build time axis assuming hourly samples; last aligns to head_dt
         times = [head_dt - timedelta(hours=(L - 1 - i)) for i in range(L)]
 
         df = pd.DataFrame({
             "t": pd.to_datetime(times),
             "PH_WH": pd.to_numeric(WH, errors="coerce"),
-            "PH_mAh": pd.to_numeric(mAh, errors="coerce"),
             "PH_SoCi": pd.to_numeric(SoCi, errors="coerce"),
         })
         return df
 
-    @st.cache_data(show_spinner=True)
-    def _build_power_timeseries(folder_id: str, latest_n: int = 3) -> pd.DataFrame:
-        files = _list_power_logs(folder_id)
-        if not files:
-            return pd.DataFrame(columns=["t","PH_WH","PH_mAh","PH_SoCi"])
+    if st.button("Show results", type="primary", key="tab3_show"):
+        if not log_metas:
+            st.warning("No power_history_*.log files found.")
+            st.stop()
+
+        # Build merged time-series from latest N logs
         frames = []
-        for meta in files[:max(1, int(latest_n))]:
-            local = _ensure_log_cached(meta)
+        for meta in log_metas[:int(lookback)]:
+            local = _ensure_log_local(meta)
             df = _parse_power_log(local)
             if df is not None and not df.empty:
                 frames.append(df)
         if not frames:
-            return pd.DataFrame(columns=["t","PH_WH","PH_mAh","PH_SoCi"])
-        merged = pd.concat(frames, ignore_index=True)
-        merged = merged.dropna(subset=["t"]).sort_values("t")
-        merged = merged.drop_duplicates(subset=["t"], keep="last").reset_index(drop=True)
-        return merged
-
-    def _power_from_energy(df: pd.DataFrame) -> pd.Series:
-        """Power (W) = d(Wh)/dt_hours using actual time deltas."""
-        if df.empty:
-            return pd.Series(dtype=float)
-        dWh = df["PH_WH"].astype(float).diff()
-        dt_h = df["t"].diff().dt.total_seconds() / 3600.0
-        P = dWh / dt_h
-        # Clean up edge cases
-        P = P.replace([np.inf, -np.inf], np.nan)
-        # Optionally smooth a little to reduce spikiness
-        P = P.rolling(3, min_periods=1, center=True).median()
-        return P
-
-    # ---- Controls (unique keys) ----
-    lookback = st.number_input("How many latest logs to stitch", min_value=3, max_value=50, value=3, step=1, key="tab3_lookback_uniq")
-    if st.button("Show results", type="primary", key="tab3_show_btn_uniq"):
-        with st.spinner("Building power time-series…"):
-            ts = _build_power_timeseries(logs_folder["id"], latest_n=int(lookback))
-
-        if ts.empty:
             st.warning("No parsable power logs found.")
             st.stop()
 
-        # Always compute and plot Power (W)
-        ts = ts.copy()
-        ts["Power_W"] = _power_from_energy(ts)
+        ts = pd.concat(frames, ignore_index=True)
+        ts = ts.dropna(subset=["t"]).sort_values("t").drop_duplicates(subset=["t"], keep="last")
 
-        # Drop rows where both series are NaN to avoid Plotly complaints
-        ts = ts.dropna(subset=["PH_SoCi", "Power_W"], how="all")
-        if ts.empty:
-            st.warning("All values became NaN after parsing; nothing to plot.")
-            st.stop()
+        # ---- WATTS instead of Wh (your request) ----
+        dt_h = ts["t"].diff().dt.total_seconds().div(3600.0)
+        ts["Power_W"] = ts["PH_WH"].astype(float).diff().div(dt_h)
+        # Light smoothing to reduce spikes from any irregular dt
+        ts["Power_W"] = ts["Power_W"].rolling(3, min_periods=1, center=True).median()
 
-        # Colors (trace & axis matched)
-        soc_color = "#2563eb"   # blue
-        pow_color = "#16a34a"   # green
-
-        # Use subplots with secondary_y to avoid layout errors
-        fig = make_subplots(specs=[[{"secondary_y": True}]])
-        fig.add_trace(
-            go.Scatter(x=ts["t"], y=ts["PH_SoCi"], mode="lines", name="SoC_i (%)", line=dict(color=soc_color)),
-            secondary_y=False,
-        )
-        fig.add_trace(
-            go.Scatter(x=ts["t"], y=ts["Power_W"], mode="lines", name="Power (W)", line=dict(color=pow_color)),
-            secondary_y=True,
-        )
-
-        # Axes styling
-        fig.update_xaxes(title_text="Time")
-        fig.update_yaxes(title_text="SoC_i (%)", secondary_y=False, rangemode="tozero",
-                         titlefont=dict(color=soc_color), tickfont=dict(color=soc_color))
-        fig.update_yaxes(title_text="Power (W)", secondary_y=True,
-                         titlefont=dict(color=pow_color), tickfont=dict(color=pow_color))
-
-        # Layout
-        fig.update_layout(
-            title_text="Power (W) and State of Charge over time",
-            legend=dict(orientation="h"),
-            margin=dict(l=10, r=10, t=50, b=10),
-        )
-
+        # Plot Power only (no extra imports)
+        fig = px.line(ts, x="t", y="Power_W",
+                      labels={"t": "Time", "Power_W": "Power (W)"},
+                      title="Power (W) over time")
+        fig.update_layout(margin=dict(l=10, r=10, t=50, b=10))
         st.plotly_chart(fig, use_container_width=True)
 
-        # Metrics (guarded)
-        last_soc = ts["PH_SoCi"].dropna().iloc[-1] if ts["PH_SoCi"].notna().any() else np.nan
+        # Quick metrics
         last_pwr = ts["Power_W"].dropna().iloc[-1] if ts["Power_W"].notna().any() else np.nan
-        c1, c2 = st.columns(2)
-        with c1:
-            st.metric("Last SoC_i (%)", f"{last_soc:.1f}" if pd.notna(last_soc) else "—")
-        with c2:
-            st.metric("Last Power (W)", f"{last_pwr:.2f}" if pd.notna(last_pwr) else "—")
-
-        st.caption("Notes: Power is computed as the time derivative of Energy (Wh) using actual time deltas between samples (W = dWh/dt).")
+        st.metric("Last Power (W)", f"{last_pwr:.2f}" if pd.notna(last_pwr) else "—")
