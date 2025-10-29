@@ -5,6 +5,68 @@ import numpy as np
 from datetime import date, datetime, timedelta
 import plotly.express as px
 import streamlit as st
+# ---- Google Drive sync (uses Streamlit secrets) ----
+import json, io
+from pathlib import Path
+
+GDRIVE_FOLDER_ID = st.secrets.get("GDRIVE_FOLDER_ID")
+SERVICE_ACCOUNT_JSON = st.secrets.get("SERVICE_ACCOUNT_JSON")
+CACHE_ROOT = Path("/tmp/gdrive_cache")
+
+if GDRIVE_FOLDER_ID and SERVICE_ACCOUNT_JSON:
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
+    from googleapiclient.http import MediaIoBaseDownload
+
+    CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+
+    creds = service_account.Credentials.from_service_account_info(
+        json.loads(SERVICE_ACCOUNT_JSON),
+        scopes=["https://www.googleapis.com/auth/drive.readonly"],
+    )
+    drive = build("drive", "v3", credentials=creds, cache_discovery=False)
+
+    def list_drive_files(folder_id: str):
+        q = f"'{folder_id}' in parents and trashed=false"
+        fields = "nextPageToken, files(id, name, mimeType, modifiedTime, md5Checksum)"
+        items, token = [], None
+        while True:
+            resp = drive.files().list(q=q, fields=fields, pageToken=token).execute()
+            items.extend(resp.get("files", []))
+            token = resp.get("nextPageToken")
+            if not token:
+                break
+        return items
+
+    def download_csvs(folder_id: str, patterns=("bn", "kn")) -> int:
+        files = list_drive_files(folder_id)
+        targets = [
+            f for f in files
+            if f["name"].lower().endswith(".csv")
+            and f["name"].lower().startswith(tuple(p.lower() for p in patterns))
+        ]
+        count = 0
+        for f in targets:
+            local_path = CACHE_ROOT / f["name"]
+            if local_path.exists():
+                continue  # simple skip if already cached
+            req = drive.files().get_media(fileId=f["id"])
+            with open(local_path, "wb") as fh:
+                downloader = MediaIoBaseDownload(fh, req)
+                done = False
+                while not done:
+                    _, done = downloader.next_chunk()
+            count += 1
+        return count
+
+    downloaded = download_csvs(GDRIVE_FOLDER_ID)
+    # Point the app to cached CSVs
+    ROOT = str(CACHE_ROOT)
+    BACKUP_ROOT = str(CACHE_ROOT / "Backup")  # optional; may be empty
+else:
+    # Fallback to local paths (e.g., on your laptop)
+    ROOT = os.environ.get("KORERONET_DATA_ROOT", r"G:\My Drive\From the node")
+    BACKUP_ROOT = os.environ.get("KORERONET_BACKUP_ROOT", r"G:\My Drive\From the node\Backup")
 
 st.set_page_config(page_title="KōreroNET Dashboard", layout="wide")
 st.markdown(
@@ -21,10 +83,15 @@ st.markdown(
 # ----------------------------
 # Hidden configuration (no folder fields in UI)
 # ----------------------------
-DEFAULT_ROOT = r"G:\My Drive\From the node"
-BACKUP_ROOT_DEFAULT = r"G:\My Drive\From the node\Backup"
-ROOT = os.environ.get("KORERONET_DATA_ROOT", DEFAULT_ROOT)
-BACKUP_ROOT = os.environ.get("KORERONET_BACKUP_ROOT", BACKUP_ROOT_DEFAULT)
+# ----------------------------
+# Hidden configuration (only if Drive not configured)
+# ----------------------------
+if "ROOT" not in globals():
+    DEFAULT_ROOT = r"G:\My Drive\From the node"
+    BACKUP_ROOT_DEFAULT = r"G:\My Drive\From the node\Backup"
+    ROOT = os.environ.get("KORERONET_DATA_ROOT", DEFAULT_ROOT)
+    BACKUP_ROOT = os.environ.get("KORERONET_BACKUP_ROOT", BACKUP_ROOT_DEFAULT)
+
 
 # ----------------------------
 # CSV discovery
