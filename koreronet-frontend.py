@@ -24,6 +24,11 @@ import streamlit as st
 # ─────────────────────────────────────────────────────────────
 st.set_page_config(page_title="KōreroNET Dashboard", layout="wide")
 
+# fallback text if headline isn't computed yet
+headline_text = st.session_state.get(
+    "headline",
+    st.session_state.get("gate_headline", "Scanning the last 48 hours on Node 0…"
+
 st.markdown("""
 <style>
 :root { color-scheme: dark; }
