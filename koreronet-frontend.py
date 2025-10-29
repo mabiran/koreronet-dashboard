@@ -39,23 +39,26 @@ st.markdown("""
 .stTabs [role="tab"] {padding:.6rem 1rem; border-radius:999px; border:1px solid #3a3a3a;}
 .small {font-size:0.9rem; opacity:0.85;}
 
-/* Nice top gradient for the landing area only */
 .hero-bg {
   background: radial-gradient(1000px 500px at 50% -10%, #1a1a1a 0%, #0b0b0b 60%, #070707 100%);
   border-radius: 24px;
   padding: 2rem 1rem;
 }
-.logos {display:flex; gap:.75rem; align-items:center; justify-content:center; margin-bottom: .8rem;}
+.logos {display:flex; gap:.75rem; align-items:center; justify-content:center; margin-bottom:.8rem;}
 .logo-pill {font-weight:800; font-size:1.05rem; letter-spacing:.06em; border:1px solid #3a3a3a; border-radius:999px; padding:.35rem .7rem;}
-.hero-h1 {font-size: clamp(40px, 6vw, 80px); margin: .2rem 0 .6rem 0; font-weight: 900; letter-spacing: .01em;}
+.hero-h1 {font-size: clamp(40px, 6vw, 80px); margin:.2rem 0 .6rem 0; font-weight: 900; letter-spacing: .01em;}
 .hero-p  {font-size: clamp(16px, 2.2vw, 22px); opacity: .95; line-height: 1.35; max-width: 1000px; margin: 0 auto;}
 .hero-cta {margin-top: 1.3rem;}
-/* Make the Streamlit button look prominent */
 div.stButton > button[kind="primary"] {padding: .7rem 1.2rem; font-weight: 700; border-radius: 999px;}
-/* Temporary full-screen fade layer used only after clicking */
 .full-fade {position:fixed; inset:0; background:#000; opacity:1;}
+
+/* --- FIX GAP ON HERO: neutralize global min-height inside hero only --- */
+.hero-bg .center-wrap { min-height: 0 !important; }
+.logos { margin-bottom: .35rem !important; }
+.hero-h1 { margin-top: .15rem !important; }
 </style>
 """, unsafe_allow_html=True)
+
 
 # ─────────────────────────────────────────────────────────────
 # Caches & local fallback
