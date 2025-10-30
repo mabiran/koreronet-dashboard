@@ -540,7 +540,7 @@ with tab1:
     kn_dates = sorted(kn_by_date.keys())
     paired_dates = sorted(set(bn_dates).intersection(set(kn_dates)))
 
-    src = st.selectbox("Source", ["KōreroNET (kn)", "BirdNET (bn)", "Combined"], index=0)
+    src = st.selectbox("Source", ["KōreroNET (kn)", "BirdNET (bn)", "Combined"], index=1)
     min_conf = st.slider("Minimum confidence", 0.0, 1.0, 0.90, 0.01)
 
     if src == "Combined":
@@ -597,7 +597,7 @@ with tab_verify:
 
     colA, colB = st.columns([2,1])
     with colA:
-        src_mode_v = st.selectbox("Source", ["KōreroNET (KN)", "BirdNET (BN)", "Combined"], index=0)
+        src_mode_v = st.selectbox("Source", ["KōreroNET (KN)", "BirdNET (BN)", "Combined"], index=1)
     with colB:
         min_conf_v = st.slider("Min confidence", 0.0, 1.0, 0.90, 0.01)
 
