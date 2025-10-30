@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3##
 # -*- coding: utf-8 -*-
 # KōreroNET Dashboard (with splash + Drive) — daily auto-refresh + change-aware indexing
 # ------------------------------------------------------------
