@@ -37,6 +37,13 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+# ----------------------------------------------------------------------------
+# New pipeline start date: detection files produced on and after this date
+# follow the new unified master CSV format.  Use this constant to decide
+# whether to load old bn/kn CSVs or the new *_birdnet_master.csv and
+# *_koreronet_master.csv files.  See process.py for details.
+NEW_PIPELINE_START = date(2025, 10, 31)
+
 # ─────────────────────────────────────────────────────────────
 # Page style
 # ─────────────────────────────────────────────────────────────
@@ -202,6 +209,150 @@ def download_to(path: Path, file_id: str) -> Path:
         while not done:
             _, done = downloader.next_chunk()
     return path
+
+# ----------------------------------------------------------------------------
+# Master CSV helpers (new pipeline)
+# ----------------------------------------------------------------------------
+#
+# In the new pipeline (from 31 Oct 2025 onward), detections are written to
+# master CSVs in the "From the node" folder.  These files are named with a
+# timestamp prefix followed by either `_birdnet_master.csv` or
+# `_koreronet_master.csv`.  Each row contains the audio clip name, the
+# actual (wall-clock) start time, the detected label and a probability.  The
+# helper functions below locate these master files in Drive or a local root,
+# read them into unified DataFrames, and build indices for calendar
+# selection.
+
+def list_master_csvs_local(root: str) -> Tuple[List[str], List[str]]:
+    """
+    Return local master CSV paths from the given root directory.  Files
+    ending with `_birdnet_master.csv` are considered BirdNET masters and
+    those ending with `_koreronet_master.csv` are considered KōreroNET
+    masters.
+    """
+    bn_paths = sorted(glob.glob(os.path.join(root, "*_birdnet_master.csv")))
+    kn_paths = sorted(glob.glob(os.path.join(root, "*_koreronet_master.csv")))
+    return bn_paths, kn_paths
+
+def list_master_csvs_drive_root(folder_id: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    Return Drive file metadata for master CSVs under the given folder.  A
+    master CSV is identified by its suffix: `_birdnet_master.csv` or
+    `_koreronet_master.csv`.  The returned lists are sorted by filename.
+    """
+    kids = list_children(folder_id, max_items=2000)
+    bn = [k for k in kids if k.get("name", "").lower().endswith("_birdnet_master.csv")]
+    kn = [k for k in kids if k.get("name", "").lower().endswith("_koreronet_master.csv")]
+    bn.sort(key=lambda m: m.get("name", ""))
+    kn.sort(key=lambda m: m.get("name", ""))
+    return bn, kn
+
+def _read_master_standard(path: Path, kind: Optional[str] = None) -> pd.DataFrame:
+    """
+    Read a master CSV (new pipeline) and return a DataFrame with unified
+    column names.  Attempts to coerce varying header names into the
+    standard set: Clip, ActualStartTime, Label, Probability.  A 'Kind'
+    column is added if `kind` is provided ("BN" or "KN").  The caller
+    should provide `kind` when the file identity is known (e.g. via
+    list_master_csvs_* functions).
+    """
+    try:
+        df = pd.read_csv(str(path))
+    except Exception:
+        return pd.DataFrame(columns=["Clip", "ActualStartTime", "Label", "Probability"])
+    # map possible column names to standard names
+    cols = {c.lower(): c for c in df.columns}
+    def pick(*cands: str) -> Optional[str]:
+        for cand in cands:
+            if cand.lower() in cols:
+                return cols[cand.lower()]
+        return None
+    clip_col = pick("clip", "chunk", "file", "wav", "chunkname")
+    time_col = pick("actualstarttime", "actual time", "actualtime", "actual_time", "time", "timestamp")
+    label_col = pick("label", "common name", "common_name", "species", "class")
+    prob_col = pick("probability", "prob", "confidence", "p")
+    if not clip_col or not time_col or not label_col:
+        return pd.DataFrame(columns=["Clip", "ActualStartTime", "Label", "Probability"])
+    out = pd.DataFrame({
+        "Clip": df[clip_col].astype(str),
+        "ActualStartTime": pd.to_datetime(df[time_col], errors="coerce", dayfirst=True),
+        "Label": df[label_col].astype(str).str.strip(),
+        # Probability may not exist (older versions may have Confidence); default to NaN
+        "Probability": pd.to_numeric(df.get(prob_col, df.get(pick("confidence", "probability"), np.nan)), errors="coerce")
+    })
+    # Remove rows with missing times or labels
+    out = out.dropna(subset=["ActualStartTime", "Label"])
+    if kind is not None:
+        out["Kind"] = kind
+    return out
+
+def build_date_index_from_masters(paths: List[Path]) -> Dict[date, List[Path]]:
+    """
+    For a list of master CSV paths, build an index mapping each date to
+    the list of files that contain detections on that date.  This helper
+    loads only the ActualStartTime column to minimize I/O.
+    """
+    idx: Dict[date, List[Path]] = {}
+    for p in paths:
+        try:
+            for chunk in pd.read_csv(p, usecols=[0, 1], chunksize=5000):
+                # column names are unknown; pick by index: Clip and ActualStartTime
+                # attempt to parse second column as datetime
+                s = pd.to_datetime(chunk.iloc[:, 1], errors="coerce", dayfirst=True)
+                for ts in s.dropna():
+                    idx.setdefault(ts.date(), []).append(p)
+        except Exception:
+            try:
+                df = _read_master_standard(p)
+                for d in df["ActualStartTime"].dt.date.unique():
+                    idx.setdefault(d, []).append(p)
+            except Exception:
+                pass
+    # deduplicate file lists
+    for key in list(idx.keys()):
+        idx[key] = sorted(set(idx[key]), key=lambda x: x.name)
+    return idx
+
+def load_master_for_day(paths: List[Path], day_selected: date) -> pd.DataFrame:
+    """
+    Given a list of master CSV paths and a selected date, load all
+    detections occurring on that date.  Returns a DataFrame with
+    Clip, ActualStartTime, Label, Probability and Kind columns if present.
+    """
+    frames = []
+    for p in paths:
+        try:
+            kind = None
+            nm = p.name.lower()
+            if nm.endswith("_birdnet_master.csv"):
+                kind = "BN"
+            elif nm.endswith("_koreronet_master.csv"):
+                kind = "KN"
+            df = _read_master_standard(p, kind=kind)
+            if df.empty:
+                continue
+            df_day = df[df["ActualStartTime"].dt.date == day_selected]
+            if not df_day.empty:
+                frames.append(df_day)
+        except Exception:
+            pass
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=["Clip", "ActualStartTime", "Label", "Probability", "Kind"])
+
+def find_backup_audio_folders(root_id: str) -> Dict[str, str]:
+    """
+    Locate the backup audio folders for BirdNET and KōreroNET under the
+    Drive root.  Returns a mapping of kind -> folder id.  If the
+    expected folders are not found, the root_id is used as a fallback.
+    """
+    # find 'Backup' folder
+    kids = list_children(root_id, max_items=2000)
+    backup = next((k for k in kids if k.get("mimeType") == "application/vnd.google-apps.folder" and k.get("name", "").lower() == "backup"), None)
+    if not backup:
+        return {"BN": root_id, "KN": root_id}
+    subkids = list_children(backup["id"], max_items=2000)
+    id_bn = next((k["id"] for k in subkids if k.get("mimeType") == "application/vnd.google-apps.folder" and k.get("name", "").lower() == "birdnet"), backup["id"])
+    id_kn = next((k["id"] for k in subkids if k.get("mimeType") == "application/vnd.google-apps.folder" and k.get("name", "").lower() == "koreronet"), backup["id"])
+    return {"BN": id_bn, "KN": id_kn}
 
 def ensure_csv_cached(meta: Dict[str, Any], subdir: str) -> Path:
     local_path = (CSV_CACHE / subdir / meta["name"])
@@ -530,75 +681,143 @@ tab1, tab_verify, tab3 = st.tabs(["📊 Detections", "🎧 Verify recordings", "
 # TAB 1 — Detections (root)
 # =========================
 with tab1:
+    # Display progress while scanning for CSVs
     center = st.empty()
     with center.container():
-        st.markdown('<div class="center-wrap fade-enter"><div>🔎 Checking root CSVs…</div></div>', unsafe_allow_html=True)
+        st.markdown('<div class="center-wrap fade-enter"><div>🔎 Checking available CSVs…</div></div>', unsafe_allow_html=True)
 
+    # Determine if new master CSVs are present.  Prefer the new pipeline if
+    # master files exist; otherwise fall back to the legacy bn/kn files.
     if drive_enabled():
-        bn_meta, kn_meta = list_csvs_drive_root(GDRIVE_FOLDER_ID)
+        # Drive case: list master CSVs first
+        m_bn_meta, m_kn_meta = list_master_csvs_drive_root(GDRIVE_FOLDER_ID)
+        m_bn_paths = [ensure_csv_cached(m, subdir="root_master/bn") for m in m_bn_meta]
+        m_kn_paths = [ensure_csv_cached(m, subdir="root_master/kn") for m in m_kn_meta]
     else:
-        bn_meta, kn_meta = [], []
+        m_bn_local, m_kn_local = list_master_csvs_local(ROOT_LOCAL)
+        m_bn_paths = [Path(p) for p in m_bn_local]
+        m_kn_paths = [Path(p) for p in m_kn_local]
 
-    if drive_enabled() and (bn_meta or kn_meta):
+    use_new_master = bool(m_bn_paths or m_kn_paths)
+
+    if use_new_master:
+        # New pipeline: build date index from master CSVs
         center.empty(); center = st.empty()
         with center.container():
-            st.markdown('<div class="center-wrap"><div>⬇️ Downloading root CSVs…</div></div>', unsafe_allow_html=True)
-        bn_paths = [ensure_csv_cached(m, subdir="root/bn") for m in bn_meta]
-        kn_paths = [ensure_csv_cached(m, subdir="root/kn") for m in kn_meta]
+            st.markdown('<div class="center-wrap"><div>⬇️ Downloading master CSVs…</div></div>', unsafe_allow_html=True)
+        # Already cached above via ensure_csv_cached
+        center.empty(); center = st.empty()
+        with center.container():
+            st.markdown('<div class="center-wrap"><div>🧮 Building date index…</div></div>', unsafe_allow_html=True)
+        bn_index = build_date_index_from_masters(m_bn_paths) if m_bn_paths else {}
+        kn_index = build_date_index_from_masters(m_kn_paths) if m_kn_paths else {}
+        center.empty()
+
+        bn_dates = sorted(bn_index.keys())
+        kn_dates = sorted(kn_index.keys())
+        combined_dates = sorted(set(bn_dates).union(set(kn_dates)))
+
+        src = st.selectbox("Source", ["KōreroNET (kn)", "BirdNET (bn)", "Combined"], index=0)
+        min_conf = st.slider("Minimum confidence", 0.0, 1.0, 0.90, 0.01)
+
+        if src == "Combined":
+            options, help_txt = combined_dates, "Dates present in any master file."
+        elif src == "BirdNET (bn)":
+            options, help_txt = bn_dates, "Dates present in BirdNET master files."
+        else:
+            options, help_txt = kn_dates, "Dates present in KōreroNET master files."
+
+        if not options:
+            st.warning(f"No available dates for {src}.")
+            st.stop()
+
+        d = calendar_pick(options, "Day", help_txt)
+
+        # Use centered layout for Show results button
+        btn_cols = st.columns([1,1,1])
+        show = False
+        with btn_cols[1]:
+            show = st.button("Show results", type="primary", key="tab1_show_btn_new")
+        if show:
+            with st.spinner("Rendering heatmap…"):
+                if src == "BirdNET (bn)":
+                    df = load_master_for_day(bn_index.get(d, []), d)
+                elif src == "KōreroNET (kn)":
+                    df = load_master_for_day(kn_index.get(d, []), d)
+                else:
+                    df_bn = load_master_for_day(bn_index.get(d, []), d)
+                    df_kn = load_master_for_day(kn_index.get(d, []), d)
+                    df = pd.concat([df_bn, df_kn], ignore_index=True)
+                if df.empty:
+                    st.warning("No detections for this day.")
+                else:
+                    # Standardize to legacy column names for heatmap
+                    df2 = df.copy()
+                    df2["Confidence"] = pd.to_numeric(df2["Probability"], errors="coerce")
+                    df2["ActualTime"] = df2["ActualStartTime"]
+                    make_heatmap(df2[["Label","Confidence","ActualTime"]], min_conf, f"{src.split()[0]} • {d.isoformat()}")
     else:
-        bn_local, kn_local = list_csvs_local(ROOT_LOCAL)
-        bn_paths = [Path(p) for p in bn_local]
-        kn_paths = [Path(p) for p in kn_local]
-
-    center.empty(); center = st.empty()
-    with center.container():
-        st.markdown('<div class="center-wrap"><div>🧮 Building date index…</div></div>', unsafe_allow_html=True)
-
-    bn_by_date = build_date_index(bn_paths) if bn_paths else {}
-    kn_by_date = build_date_index(kn_paths) if kn_paths else {}
-
-    center.empty()
-    bn_dates = sorted(bn_by_date.keys())
-    kn_dates = sorted(kn_by_date.keys())
-    paired_dates = sorted(set(bn_dates).intersection(set(kn_dates)))
-
-    src = st.selectbox("Source", ["KōreroNET (kn)", "BirdNET (bn)", "Combined"], index=0)
-    min_conf = st.slider("Minimum confidence", 0.0, 1.0, 0.90, 0.01)
-
-    if src == "Combined":
-        options, help_txt = paired_dates, "Only dates that have BOTH BN & KN detections."
-    elif src == "BirdNET (bn)":
-        options, help_txt = bn_dates, "Dates present in any BN file."
-    else:
-        options, help_txt = kn_dates, "Dates present in any KN file."
-
-    if not options:
-        st.warning(f"No available dates for {src}."); st.stop()
-
-    d = calendar_pick(options, "Day", help_txt)
-
-    def load_and_filter(paths: List[Path], kind: str, day_selected: date):
-        frames = []
-        for p in paths:
-            try:
-                df = load_csv(p)
-                std = standardize_df(df, kind)
-                std = std[std["ActualTime"].dt.date == day_selected]
-                if not std.empty: frames.append(std)
-            except Exception:
-                pass
-        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-
-    if st.button("Show results", type="primary", key="tab1_show_btn"):
-        with st.spinner("Rendering heatmap…"):
-            if src == "BirdNET (bn)":
-                make_heatmap(load_and_filter(bn_by_date.get(d, []), "bn", d), min_conf, f"BirdNET • {d.isoformat()}")
-            elif src == "KōreroNET (kn)":
-                make_heatmap(load_and_filter(kn_by_date.get(d, []), "kn", d), min_conf, f"KōreroNET • {d.isoformat()}")
-            else:
-                df_bn = load_and_filter(bn_by_date.get(d, []), "bn", d)
-                df_kn = load_and_filter(kn_by_date.get(d, []), "kn", d)
-                make_heatmap(pd.concat([df_bn, df_kn], ignore_index=True), min_conf, f"Combined (BN+KN) • {d.isoformat()}")
+        # Legacy pipeline: fall back to bn*.csv and kn*.csv
+        if drive_enabled():
+            bn_meta, kn_meta = list_csvs_drive_root(GDRIVE_FOLDER_ID)
+        else:
+            bn_meta, kn_meta = [], []
+        if drive_enabled() and (bn_meta or kn_meta):
+            center.empty(); center = st.empty()
+            with center.container():
+                st.markdown('<div class="center-wrap"><div>⬇️ Downloading root CSVs…</div></div>', unsafe_allow_html=True)
+            bn_paths = [ensure_csv_cached(m, subdir="root/bn") for m in bn_meta]
+            kn_paths = [ensure_csv_cached(m, subdir="root/kn") for m in kn_meta]
+        else:
+            bn_local, kn_local = list_csvs_local(ROOT_LOCAL)
+            bn_paths = [Path(p) for p in bn_local]
+            kn_paths = [Path(p) for p in kn_local]
+        center.empty(); center = st.empty()
+        with center.container():
+            st.markdown('<div class="center-wrap"><div>🧮 Building date index…</div></div>', unsafe_allow_html=True)
+        bn_by_date = build_date_index(bn_paths) if bn_paths else {}
+        kn_by_date = build_date_index(kn_paths) if kn_paths else {}
+        center.empty()
+        bn_dates = sorted(bn_by_date.keys())
+        kn_dates = sorted(kn_by_date.keys())
+        paired_dates = sorted(set(bn_dates).intersection(set(kn_dates)))
+        src = st.selectbox("Source", ["KōreroNET (kn)", "BirdNET (bn)", "Combined"], index=0)
+        min_conf = st.slider("Minimum confidence", 0.0, 1.0, 0.90, 0.01)
+        if src == "Combined":
+            options, help_txt = paired_dates, "Only dates that have BOTH BN & KN detections."
+        elif src == "BirdNET (bn)":
+            options, help_txt = bn_dates, "Dates present in any BN file."
+        else:
+            options, help_txt = kn_dates, "Dates present in any KN file."
+        if not options:
+            st.warning(f"No available dates for {src}."); st.stop()
+        d = calendar_pick(options, "Day", help_txt)
+        def load_and_filter(paths: List[Path], kind: str, day_selected: date):
+            frames = []
+            for p in paths:
+                try:
+                    df = load_csv(p)
+                    std = standardize_df(df, kind)
+                    std = std[std["ActualTime"].dt.date == day_selected]
+                    if not std.empty: frames.append(std)
+                except Exception:
+                    pass
+            return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        # Centered Show results button for legacy path
+        btn_cols2 = st.columns([1,1,1])
+        show_legacy = False
+        with btn_cols2[1]:
+            show_legacy = st.button("Show results", type="primary", key="tab1_show_btn_legacy")
+        if show_legacy:
+            with st.spinner("Rendering heatmap…"):
+                if src == "BirdNET (bn)":
+                    make_heatmap(load_and_filter(bn_by_date.get(d, []), "bn", d), min_conf, f"BirdNET • {d.isoformat()}")
+                elif src == "KōreroNET (kn)":
+                    make_heatmap(load_and_filter(kn_by_date.get(d, []), "kn", d), min_conf, f"KōreroNET • {d.isoformat()}")
+                else:
+                    df_bn = load_and_filter(bn_by_date.get(d, []), "bn", d)
+                    df_kn = load_and_filter(kn_by_date.get(d, []), "kn", d)
+                    make_heatmap(pd.concat([df_bn, df_kn], ignore_index=True), min_conf, f"Combined (BN+KN) • {d.isoformat()}")
 
 # ================================
 # TAB 2 — Verify (snapshot date)
@@ -607,39 +826,92 @@ with tab_verify:
     if not drive_enabled():
         st.error("Google Drive is not configured in secrets."); st.stop()
 
+    # Display progress indicator
     center2 = st.empty()
     with center2.container():
-        st.markdown('<div class="center-wrap fade-enter"><div>📚 Indexing master CSVs by snapshot date…</div></div>', unsafe_allow_html=True)
-    master = build_master_index_by_snapshot_date(GDRIVE_FOLDER_ID)
+        st.markdown('<div class="center-wrap fade-enter"><div>📚 Loading master detections…</div></div>', unsafe_allow_html=True)
+
+    # Load old snapshot master index (legacy pipeline)
+    master_old = build_master_index_by_snapshot_date(GDRIVE_FOLDER_ID)
+
+    # Load new master CSVs (new pipeline).  These files reside in the
+    # "From the node" root.  If none are present, the lists will be empty.
+    if drive_enabled():
+        n_bn_meta, n_kn_meta = list_master_csvs_drive_root(GDRIVE_FOLDER_ID)
+        n_bn_paths = [ensure_csv_cached(m, subdir="root_master/bn") for m in n_bn_meta]
+        n_kn_paths = [ensure_csv_cached(m, subdir="root_master/kn") for m in n_kn_meta]
+    else:
+        n_bn_local, n_kn_local = list_master_csvs_local(ROOT_LOCAL)
+        n_bn_paths = [Path(p) for p in n_bn_local]
+        n_kn_paths = [Path(p) for p in n_kn_local]
+
+    frames_new: List[pd.DataFrame] = []
+    # Build mapping of Kind to drive folder id (only used for new pipeline)
+    bk_map = find_backup_audio_folders(GDRIVE_FOLDER_ID) if drive_enabled() else {"BN": "", "KN": ""}
+    # Read new master CSVs and annotate with Kind and ChunkDriveFolderId
+    for p in n_bn_paths:
+        df = _read_master_standard(p, kind="BN")
+        if df.empty:
+            continue
+        df["Date"] = df["ActualStartTime"].dt.date
+        df.rename(columns={"Probability": "Confidence"}, inplace=True)
+        df["ChunkName"] = df["Clip"]
+        df["ChunkDriveFolderId"] = bk_map.get("BN", "")
+        frames_new.append(df[["Date", "Kind", "Label", "Confidence", "ChunkName", "ChunkDriveFolderId"]])
+    for p in n_kn_paths:
+        df = _read_master_standard(p, kind="KN")
+        if df.empty:
+            continue
+        df["Date"] = df["ActualStartTime"].dt.date
+        df.rename(columns={"Probability": "Confidence"}, inplace=True)
+        df["ChunkName"] = df["Clip"]
+        df["ChunkDriveFolderId"] = bk_map.get("KN", "")
+        frames_new.append(df[["Date", "Kind", "Label", "Confidence", "ChunkName", "ChunkDriveFolderId"]])
+    df_new = pd.concat(frames_new, ignore_index=True) if frames_new else pd.DataFrame(columns=["Date","Kind","Label","Confidence","ChunkName","ChunkDriveFolderId"])
+
+    # Prepare old master DataFrame (if any)
+    if not master_old.empty:
+        # master_old contains Date, Kind, Label, Confidence, Start, End, WavBase, ChunkName, ChunkDriveFolderId, SnapId, SnapName
+        df_old = master_old.copy()
+        df_old = df_old[["Date", "Kind", "Label", "Confidence", "ChunkName", "ChunkDriveFolderId"]]
+    else:
+        df_old = pd.DataFrame(columns=["Date","Kind","Label","Confidence","ChunkName","ChunkDriveFolderId"])
+
+    # Combine new and old detections
+    master_all = pd.concat([df_old, df_new], ignore_index=True)
     center2.empty()
 
-    if master.empty:
-        st.warning("No master CSVs found in any snapshot (looked in snapshot root and one-level subfolders).")
+    if master_all.empty:
+        st.warning("No detections found in any master CSV.")
         st.stop()
 
+    # Filter by user-selected source and confidence
     colA, colB = st.columns([2,1])
     with colA:
         src_mode_v = st.selectbox("Source", ["KōreroNET (KN)", "BirdNET (BN)", "Combined"], index=0)
     with colB:
         min_conf_v = st.slider("Min confidence", 0.0, 1.0, 0.90, 0.01)
 
+    df_pool = master_all.copy()
+    df_pool = df_pool[pd.to_numeric(df_pool["Confidence"], errors="coerce") >= float(min_conf_v)]
     if src_mode_v == "KōreroNET (KN)":
-        pool = master[master["Kind"]=="KN"]
+        df_pool = df_pool[df_pool["Kind"] == "KN"]
     elif src_mode_v == "BirdNET (BN)":
-        pool = master[master["Kind"]=="BN"]
-    else:
-        pool = master
-    pool = pool[pd.to_numeric(pool["Confidence"], errors="coerce") >= float(min_conf_v)]
-    if pool.empty:
-        st.info("No rows above the selected confidence."); st.stop()
+        df_pool = df_pool[df_pool["Kind"] == "BN"]
+    # If after filtering we have no rows, inform the user
+    if df_pool.empty:
+        st.info("No detections above the selected confidence.")
+        st.stop()
 
-    avail_days = sorted(pool["Date"].unique())
-    day_pick = calendar_pick(list(avail_days), "Day", "Dates come from snapshot folder names under Backup/.")
+    avail_days = sorted(df_pool["Date"].unique())
+    day_pick = st.date_input("Day", value=avail_days[-1], min_value=avail_days[0], max_value=avail_days[-1])
 
-    day_df = pool[pool["Date"] == day_pick]
+    day_df = df_pool[df_pool["Date"] == day_pick]
     if day_df.empty:
-        st.warning("No detections for the chosen date."); st.stop()
+        st.warning("No detections for the chosen date.")
+        st.stop()
 
+    # Build label list with counts
     counts = day_df.groupby("Label").size().sort_values(ascending=False)
     species = st.selectbox(
         "Species",
@@ -649,49 +921,69 @@ with tab_verify:
         key=f"verify_species::{day_pick.isoformat()}::{src_mode_v}",
     )
 
-    playlist = day_df[day_df["Label"] == species].sort_values(["WavBase","Kind"]).reset_index(drop=True)
+    playlist = day_df[day_df["Label"] == species].copy()
+    # Sort for deterministic navigation: sort by time or chunk name
+    playlist.sort_values(["Kind", "ChunkName"], inplace=True)
+    playlist.reset_index(drop=True, inplace=True)
 
     idx_key = f"v2_idx::{day_pick.isoformat()}::{src_mode_v}::{species}"
-    if idx_key not in st.session_state: st.session_state[idx_key] = 0
+    if idx_key not in st.session_state:
+        st.session_state[idx_key] = 0
     idx = st.session_state[idx_key] % len(playlist)
 
-    col1, col2, col3, col4 = st.columns([1,1,1,6])
+    # Center navigation buttons using columns
+    nav_cols = st.columns([2,1,1,1,2])
     autoplay = False
-    with col1:
-        if st.button("⏮ Prev"): idx = (idx - 1) % len(playlist); autoplay = True
-    with col2:
-        if st.button("▶ Play"): autoplay = True
-    with col3:
-        if st.button("⏭ Next"): idx = (idx + 1) % len(playlist); autoplay = True
+    with nav_cols[1]:
+        if st.button("⏮ Prev"):
+            idx = (idx - 1) % len(playlist)
+            autoplay = True
+    with nav_cols[2]:
+        if st.button("▶ Play"):
+            autoplay = True
+    with nav_cols[3]:
+        if st.button("⏭ Next"):
+            idx = (idx + 1) % len(playlist)
+            autoplay = True
     st.session_state[idx_key] = idx
 
     row = playlist.iloc[idx]
-    st.markdown(f"**Date:** {row['Date']}  |  **File:** `{row['ChunkName']}`  |  **Kind:** {row['Kind']}  |  **Confidence:** {float(row['Confidence']):.3f}")
+    st.markdown(
+        f"**Date:** {row['Date']}  |  **File:** `{row['ChunkName']}`  |  **Kind:** {row['Kind']}  |  **Confidence:** {float(row['Confidence']):.3f}"
+    )
 
-    def _play_audio(row_: pd.Series, auto: bool):
-        chunk_name = str(row_.get("ChunkName","") or "")
-        folder_id  = str(row_.get("ChunkDriveFolderId","") or "")
-        kind       = str(row_.get("Kind","UNK"))
-        if not (chunk_name and folder_id):
-            st.warning("No chunk mapping available."); return
-        subdir = f"{kind}"
+    # Unified audio player: use ChunkName, ChunkDriveFolderId and Kind
+    def _play_audio_unified(row_: pd.Series, auto: bool):
+        chunk_name = str(row_.get("ChunkName", "") or "")
+        folder_id = str(row_.get("ChunkDriveFolderId", "") or "")
+        kind = str(row_.get("Kind", "")).upper() or "UNK"
+        if not chunk_name or not folder_id:
+            st.warning("No audio mapping available.")
+            return
+        # Use kind as subdir name (BN or KN)
+        subdir = kind
         with st.spinner("Fetching audio…"):
             cached = ensure_chunk_cached(chunk_name, folder_id, subdir=subdir)
         if not cached or not cached.exists():
-            st.warning("Audio chunk not found in Drive folder."); return
+            st.warning("Audio chunk not found in Drive backup.")
+            return
         try:
             with open(cached, "rb") as f:
                 data = f.read()
         except Exception:
-            st.warning("Cannot open audio chunk."); return
+            st.warning("Cannot open audio chunk.")
+            return
         if auto:
             import base64
             b64 = base64.b64encode(data).decode()
-            st.markdown(f'<audio controls autoplay src="data:audio/wav;base64,{b64}"></audio>', unsafe_allow_html=True)
+            st.markdown(
+                f'<audio controls autoplay src="data:audio/wav;base64,{b64}"></audio>',
+                unsafe_allow_html=True,
+            )
         else:
             st.audio(data, format="audio/wav")
 
-    _play_audio(row, autoplay)
+    _play_audio_unified(row, autoplay)
 
 # =====================
 # TAB 3 — Power graph
@@ -810,16 +1102,42 @@ with tab3:
         merged = pd.concat(frames, ignore_index=True)
         merged.sort_values("t", inplace=True)
         merged = merged.drop_duplicates(subset=["t"], keep="last")
-        merged.reset_index(drop=True, inplace=True)
+        # At this point merged may contain zeros when the node restarts.  Treat
+        # zeros as missing values and interpolate over hourly gaps.  Drop the
+        # existing index and set the time column as the index for resampling.
+        for c in ["PH_WH", "PH_mAh", "PH_SoCi", "PH_SoCv"]:
+            # convert exactly zero values to NaN
+            merged.loc[merged[c] == 0.0, c] = np.nan
+        # Set time as index and enforce hourly frequency
+        merged.set_index("t", inplace=True)
+        # Generate continuous hourly index spanning the full range
+        merged = merged.asfreq("H")
+        # Interpolate missing values using time-based interpolation
+        merged = merged.interpolate(method="time", limit_direction="both")
+        merged.reset_index(inplace=True)
         return merged
 
     cols = st.columns([2,1])
     with cols[0]:
-        lookback = st.number_input("How many latest logs to stitch", min_value=1, max_value=50, value=2, step=1, key="tab3_lookback")
+        lookback = st.number_input(
+            "How many latest logs to stitch",
+            min_value=1,
+            max_value=50,
+            value=2,
+            step=1,
+            key="tab3_lookback",
+        )
+    # Reserve second column for spacing
     with cols[1]:
         pass
 
-    if st.button("Show results", type="primary", key="tab3_show_btn"):
+    # Center the 'Show results' button for better aesthetics
+    btn_cols3 = st.columns([1,1,1])
+    show_power = False
+    with btn_cols3[1]:
+        show_power = st.button("Show results", type="primary", key="tab3_show_btn")
+
+    if show_power:
         with st.spinner("Building power time-series…"):
             ts = build_power_timeseries(logs_folder["id"], latest_n=int(lookback))
 
@@ -828,26 +1146,26 @@ with tab3:
         else:
             fig = go.Figure()
             # SoC_i (%) on y1
-            fig.add_trace(go.Scatter(
-                x=ts["t"], y=ts["PH_SoCi"], mode="lines", name="SoC_i (%)", yaxis="y1"
-            ))
+            fig.add_trace(
+                go.Scatter(x=ts["t"], y=ts["PH_SoCi"], mode="lines", name="SoC_i (%)", yaxis="y1")
+            )
             # Wh on y2
-            fig.add_trace(go.Scatter(
-                x=ts["t"], y=ts["PH_WH"], mode="lines", name="Energy (Wh)", yaxis="y2"
-            ))
-
+            fig.add_trace(
+                go.Scatter(x=ts["t"], y=ts["PH_WH"], mode="lines", name="Energy (Wh)", yaxis="y2")
+            )
             fig.update_layout(
                 title="Power / State of Charge over time",
                 xaxis=dict(title="Time"),
-                yaxis=dict(title="SoC (%)", range=[0,100]),
+                yaxis=dict(title="SoC (%)", range=[0, 100]),
                 yaxis2=dict(title="Wh", overlaying="y", side="right"),
                 legend=dict(orientation="h"),
                 margin=dict(l=10, r=10, t=50, b=10),
             )
             st.plotly_chart(fig, use_container_width=True)
-
             # Quick last-point indicators
             last = ts.iloc[-1]
             c1, c2 = st.columns(2)
-            with c1: st.metric("Last SoC_i (%)", f"{last['PH_SoCi']:.1f}")
-            with c2: st.metric("Last Energy (Wh)", f"{last['PH_WH']:.2f}")
+            with c1:
+                st.metric("Last SoC_i (%)", f"{last['PH_SoCi']:.1f}")
+            with c2:
+                st.metric("Last Energy (Wh)", f"{last['PH_WH']:.2f}")
