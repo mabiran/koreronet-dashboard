@@ -343,34 +343,129 @@ def _find_backup_folder(root_folder_id: str) -> Optional[Dict[str, Any]]:
     return None
 
 def _find_chunk_dirs(snapshot_id: str) -> Dict[str, str]:
-    kids = list_children(snapshot_id, max_items=2000)
-    kn = [k for k in kids if k.get("mimeType")=="application/vnd.google-apps.folder" and "koreronet" in k.get("name","").lower()]
-    bn = [k for k in kids if k.get("mimeType")=="application/vnd.google-apps.folder" and "birdnet"   in k.get("name","").lower()]
-    return {"KN": (kn[0]["id"] if kn else snapshot_id), "BN": (bn[0]["id"] if bn else snapshot_id)}
+    """
+    Robustly locate the per-snapshot chunk folders for KN and BN.
+    Strategy:
+      1) Prefer direct children whose names look like 'KōreroNET/korero/kn' or 'BirdNET/bn'.
+      2) If ambiguous or missing, fall back to the folder with the most '__kn_' / '__bn_' .wav files
+         among first-level subfolders (content-aware).
+      3) Last resort: use the snapshot root so playback still works if chunks are at root.
+    """
+    import unicodedata
+
+    def _fold_ci(s: str) -> str:
+        s = unicodedata.normalize("NFKD", str(s or ""))
+        s = "".join(ch for ch in s if not unicodedata.combining(ch))
+        s = s.lower()
+        s = re.sub(r"[\s_\-]+", "", s)
+        return s
+
+    def _score_chunkiness(folder_id: str, expect: str, max_depth: int = 1) -> int:
+        tag = "__bn_" if expect.upper() == "BN" else "__kn_"
+        score = 0
+        stack = [(folder_id, 0)]
+        while stack:
+            fid, d = stack.pop()
+            try:
+                kids = list_children(fid, max_items=2000)
+            except Exception:
+                continue
+            for k in kids:
+                mt = k.get("mimeType", "")
+                nm = (k.get("name") or "").lower()
+                if mt == "application/vnd.google-apps.folder":
+                    if d < max_depth:
+                        stack.append((k["id"], d + 1))
+                else:
+                    if nm.endswith(".wav") and tag in nm:
+                        score += 1
+        return score
+
+    children = list_children(snapshot_id, max_items=2000)
+    folders  = [c for c in children if c.get("mimeType") == "application/vnd.google-apps.folder"]
+
+    def _pick(want: str) -> str:
+        want_kw = ("koreronet", "korero", "knet", "kn") if want == "KN" else ("birdnet", "bird", "bn")
+        # 1) Name-based pass
+        matches = []
+        for f in folders:
+            key = _fold_ci(f.get("name", ""))
+            if any(kw in key for kw in want_kw):
+                matches.append(f)
+        if matches:
+            # break ties by content
+            best, best_s = None, -1
+            for f in matches:
+                s = _score_chunkiness(f["id"], want, max_depth=1)
+                if s > best_s:
+                    best_s, best = s, f
+            return best["id"] if best else matches[0]["id"]
+
+        # 2) Fallback: most chunk-like folder by content
+        best, best_s = None, -1
+        for f in folders:
+            s = _score_chunkiness(f["id"], want, max_depth=1)
+            if s > best_s:
+                best_s, best = s, f
+        if best and best_s > 0:
+            return best["id"]
+
+        # 3) Last resort: snapshot root
+        return snapshot_id
+
+    return {"KN": _pick("KN"), "BN": _pick("BN")}
 
 def _match_master_name(name: str, kind: str) -> bool:
-    n = name.lower()
-    if kind == "KN":
-        return (("koreronet" in n) and ("detect" in n) and n.endswith(".csv"))
+    """
+    Broader master CSV matcher:
+      - Accepts tokens: detect, detections, mapped, master
+      - Accepts BN tags: birdnet, bn, bird
+      - Accepts KN tags: koreronet, korero, kn, knet
+      - Must end with .csv
+    """
+    n = (name or "").strip()
+    if not n.lower().endswith(".csv"):
+        return False
+    key = re.sub(r"[\s_\-]+", "", n.lower())
+    has_det = any(tok in key for tok in ("detect", "detections", "mapped", "master"))
+    if kind.upper() == "BN":
+        has_src = any(tok in key for tok in ("birdnet", "bn", "bird"))
     else:
-        return (("birdnet" in n) and ("detect" in n) and n.endswith(".csv"))
+        has_src = any(tok in key for tok in ("koreronet", "korero", "kn", "knet"))
+    return has_src and has_det
+
 
 def _find_master_anywhere(snapshot_id: str, kind: str) -> Optional[Dict[str, Any]]:
-    root_kids = list_children(snapshot_id, max_items=2000)
-    files_only = [f for f in root_kids if f.get("mimeType") != "application/vnd.google-apps.folder"]
-    cands = [f for f in files_only if _match_master_name(f.get("name",""), kind)]
-    if cands:
-        cands.sort(key=lambda m: m.get("modifiedTime",""), reverse=True)
-        return dict(cands[0])
-    subfolders = [f for f in root_kids if f.get("mimeType") == "application/vnd.google-apps.folder"]
+    """
+    Search snapshot root and first-level subfolders for a matching master CSV.
+    If multiple candidates exist, return the most recently modified.
+    """
+    kids = list_children(snapshot_id, max_items=2000)
+
+    def _best(cands: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if not cands:
+            return None
+        cands = [c for c in cands if isinstance(c.get("modifiedTime"), str)]
+        cands.sort(key=lambda m: m.get("modifiedTime", ""), reverse=True)
+        return dict(cands[0]) if cands else None
+
+    # Root files
+    root_files = [f for f in kids if f.get("mimeType") != "application/vnd.google-apps.folder"]
+    root_cands = [f for f in root_files if _match_master_name(f.get("name", ""), kind)]
+    best_root = _best(root_cands)
+    if best_root:
+        return best_root
+
+    # First-level subfolders
+    subfolders = [f for f in kids if f.get("mimeType") == "application/vnd.google-apps.folder"]
+    all_cands: List[Dict[str, Any]] = []
     for sf in subfolders:
-        sub_files = list_children(sf["id"], max_items=2000)
-        sub_files = [f for f in sub_files if f.get("mimeType") != "application/vnd.google-apps.folder"]
-        c2 = [f for f in sub_files if _match_master_name(f.get("name",""), kind)]
-        if c2:
-            c2.sort(key=lambda m: m.get("modifiedTime",""), reverse=True)
-            return dict(c2[0])
-    return None
+        subkids = list_children(sf["id"], max_items=2000)
+        subfiles = [f for f in subkids if f.get("mimeType") != "application/vnd.google-apps.folder"]
+        all_cands.extend([f for f in subfiles if _match_master_name(f.get("name", ""), kind)])
+
+    return _best(all_cands)
+
 
 @st.cache_data(show_spinner=True)
 def build_master_index_by_snapshot_date(root_folder_id: str) -> pd.DataFrame:
