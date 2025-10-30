@@ -58,6 +58,33 @@ st.markdown("""
 .small {font-size:0.9rem; opacity:0.85;}
 </style>
 """, unsafe_allow_html=True)
+# ---- Chunk filename parsing / cache helpers ----
+CHUNK_RE = re.compile(
+    r"^(?P<root>\d{8}_\d{6})__(?P<tag>bn|kn)_(?P<s>\d+\.\d{2})_(?P<e>\d+\.\d{2})__(?P<label>.+?)__p(?P<conf>\d+\.\d{2})\.wav$",
+    re.IGNORECASE,
+)
+
+def _parse_chunk_filename(name: str) -> Optional[Dict[str, Any]]:
+    m = CHUNK_RE.match(name or "")
+    if not m:
+        return None
+    try:
+        return {
+            "root":  m.group("root"),
+            "tag":   m.group("tag").lower(),
+            "s":     float(m.group("s")),
+            "e":     float(m.group("e")),
+            "label": m.group("label"),
+            "conf":  float(m.group("conf")),
+        }
+    except Exception:
+        return None
+
+def _folder_children_cached(folder_id: str) -> List[Dict[str, Any]]:
+    key = f"drive_kids::{folder_id}"
+    if key not in st.session_state:
+        st.session_state[key] = list_children(folder_id, max_items=2000)
+    return st.session_state[key]
 
 # ─────────────────────────────────────────────────────────────
 # Simple splash gate
@@ -183,24 +210,73 @@ def ensure_csv_cached(meta: Dict[str, Any], subdir: str) -> Path:
     return local_path
 
 def ensure_chunk_cached(chunk_name: str, folder_id: str, subdir: str) -> Optional[Path]:
+    """
+    Try exact name first. If missing, fuzzy-match by (root, tag, label) and choose
+    the chunk whose [s,e] window contains the requested [s_t,e_t] (±0.75s tolerance).
+    """
     local_path = CHUNK_CACHE / subdir / chunk_name
     if local_path.exists():
         return local_path
-    for k in list_children(folder_id, max_items=2000):
-        if k.get("name") == chunk_name:
-            try:
-                download_to(local_path, k["id"])
-                return local_path
-            except Exception:
-                return None
-    return None
 
-def find_subfolder_by_name(root_id: str, name_ci: str) -> Optional[Dict[str, Any]]:
-    kids = list_children(root_id, max_items=2000)
+    # 1) Exact lookup
+    kids = _folder_children_cached(folder_id)
+    name_to_id = {k.get("name"): k.get("id") for k in kids}
+    if chunk_name in name_to_id:
+        try:
+            download_to(local_path, name_to_id[chunk_name])
+            return local_path
+        except Exception:
+            return None
+
+    # 2) Fuzzy fallback
+    # Parse the target request so we know what we’re looking for
+    target = _parse_chunk_filename(chunk_name)
+    if not target:
+        return None
+
+    root_t  = target["root"]
+    tag_t   = target["tag"]
+    s_t     = target["s"]
+    e_t     = target["e"]
+    label_t = target["label"].lower()
+
+    # Gather candidate WAVs in the folder
+    candidates = []
     for k in kids:
-        if k.get("mimeType")=="application/vnd.google-apps.folder" and k.get("name","").lower()==name_ci.lower():
-            return k
-    return None
+        nm = k.get("name","")
+        if not nm.lower().endswith(".wav"):
+            continue
+        info = _parse_chunk_filename(nm)
+        if not info:
+            continue
+        # same recording root, same tag (bn/kn), same label (case-insensitive, underscores same)
+        if info["root"] == root_t and info["tag"] == tag_t and info["label"].lower() == label_t:
+            candidates.append((info, k.get("id"), nm))
+
+    if not candidates:
+        return None
+
+    # Choose the candidate whose [s,e] contains [s_t,e_t] with a small tolerance
+    tol = 0.75  # seconds
+    def score(cinfo):
+        s_c, e_c = cinfo["s"], cinfo["e"]
+        # containment check
+        contains = (s_c - tol) <= s_t and (e_c + tol) >= e_t
+        # closeness (center distance) as tie-breaker
+        cen_diff = abs(((s_c + e_c) * 0.5) - ((s_t + e_t) * 0.5))
+        return (0 if contains else 1, cen_diff)
+
+    candidates.sort(key=lambda it: score(it[0]))
+    best_info, best_id, best_name = candidates[0]
+
+    try:
+        download_to(local_path, best_id)
+        # Optional: let the user know we had to fuzzy-match
+        st.caption(f"⚠️ Used fuzzy match: requested `{chunk_name}` → found `{best_name}`")
+        return local_path
+    except Exception:
+        return None
+
 
 # ─────────────────────────────────────────────────────────────
 # Tab 1 (root CSV heatmap)
