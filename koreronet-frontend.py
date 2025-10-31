@@ -43,19 +43,50 @@ except Exception:
 # Page style
 # ─────────────────────────────────────────────────────────────
 st.set_page_config(page_title="KōreroNET Dashboard", layout="wide")
-st.markdown("""
-<style>
-.block-container {padding-top:1rem; padding-bottom:1rem;}
-.center-wrap {display:flex; align-items:center; justify-content:center; min-height:58vh; text-align:center;}
-.brand-title {font-size: clamp(48px, 8vw, 96px); font-weight: 800; letter-spacing: .02em;}
-.brand-sub {font-size: clamp(28px, 4vw, 48px); font-weight: 600; opacity:.9; margin-top:.4rem;}
-.fade-enter {animation: fadeIn 300ms ease forwards;}
-@keyframes fadeIn { from {opacity:0} to {opacity:1} }
-.stTabs [role="tablist"] {gap:.5rem;}
-.stTabs [role="tab"] {padding:.6rem 1rem; border-radius:999px; border:1px solid #3a3a3a;}
-.small {font-size:0.9rem; opacity:0.85;}
-</style>
-""", unsafe_allow_html=True)
+# ─────────────────────────────────────────────────────────────
+# Splash / Gate (no hard lock)
+# ─────────────────────────────────────────────────────────────
+def show_overlay():
+    st.markdown(
+        """
+        <style>
+        .overlay {
+          position: fixed; inset: 0; z-index: 9999;
+          display: grid; place-items: center;
+          background: radial-gradient(1000px 500px at 50% -10%, #1a1a1a 0%, #0b0b0b 60%, #070707 100%);
+        }
+        .overlay-inner { text-align:center; padding: 2rem; }
+        .brand-title {font-size: clamp(48px, 8vw, 96px); font-weight: 800; letter-spacing:.02em;}
+        .brand-sub {font-size: clamp(28px, 4vw, 48px); font-weight:600; opacity:.9; margin-top:.4rem;}
+        </style>
+        <div class="overlay">
+          <div class="overlay-inner">
+            <div class="brand-title">KōreroNET</div>
+            <div class="brand-sub">AUT • GeoEnviroSense</div>
+            <p style="opacity:.85;margin:.75rem 0 1.25rem">initialising…</p>
+        """,
+        unsafe_allow_html=True,
+    )
+    c1, c2, c3 = st.columns([2,2,2])
+    with c2:
+        if st.button("Enter dashboard", type="primary", use_container_width=True, key="enter_btn"):
+            st.session_state["entered"] = True
+            st.rerun()
+    st.markdown(
+        '<p style="text-align:center;margin-top:.75rem;opacity:.7">Having trouble? '
+        'Append <code>?skip_splash=1</code> to the URL.</p></div></div>',
+        unsafe_allow_html=True,
+    )
+
+# Bypass via URL: …/app?skip_splash=1
+skip = st.query_params.get("skip_splash", ["0"])[0] if hasattr(st, "query_params") else "0"
+if skip == "1":
+    st.session_state["entered"] = True
+
+if not st.session_state.get("entered", False):
+    show_overlay()
+    # NOTE: No st.stop() — UI renders underneath but overlay blocks until clicked.
+
 
 # ============================================================================
 # Constants & Regex
