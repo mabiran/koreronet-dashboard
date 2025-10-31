@@ -922,6 +922,14 @@ with tab3:
 
         times = [head_dt - timedelta(hours=(L-1 - i)) for i in range(L)]
         df = pd.DataFrame({"t": times, "PH_WH": WH, "PH_mAh": mAh, "PH_SoCi": SoCi, "PH_SoCv": SoCv})
+        eps = 1e-9
+        all_zero_mask = (
+            (np.abs(df["PH_WH"])   < eps) &
+            (np.abs(df["PH_mAh"])  < eps) &
+            (np.abs(df["PH_SoCi"]) < eps) &
+            (np.abs(df["PH_SoCv"]) < eps)
+        )
+        df = df.loc[~all_zero_mask].reset_index(drop=True)
         return df
 
     cache_epoch = st.session_state.get("DRIVE_EPOCH", "0")
@@ -935,7 +943,8 @@ with tab3:
                 if df is not None and not df.empty:
                     frames.append(df)
             ts = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=["t","PH_WH","PH_mAh","PH_SoCi","PH_SoCv"])
-
+            if not ts.empty:
+                ts = ts.drop_duplicates(subset=["t"]).sort_values("t").reset_index(drop=True)
         if ts.empty:
             st.warning("No parsable power logs found.")
         else:
