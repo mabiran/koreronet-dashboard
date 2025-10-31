@@ -43,6 +43,7 @@ except Exception:
 # Page style
 # ─────────────────────────────────────────────────────────────
 st.set_page_config(page_title="KōreroNET Dashboard", layout="wide")
+
 # ─────────────────────────────────────────────────────────────
 # Splash / Gate (no hard lock)
 # ─────────────────────────────────────────────────────────────
@@ -79,13 +80,37 @@ def show_overlay():
     )
 
 # Bypass via URL: …/app?skip_splash=1
-skip = st.query_params.get("skip_splash", ["0"])[0] if hasattr(st, "query_params") else "0"
+skip = "0"
+try:
+    skip = st.query_params.get("skip_splash", "0")
+except Exception:
+    try:
+        skip = st.experimental_get_query_params().get("skip_splash", ["0"])[0]
+    except Exception:
+        pass
 if skip == "1":
     st.session_state["entered"] = True
 
 if not st.session_state.get("entered", False):
     show_overlay()
-    # NOTE: No st.stop() — UI renders underneath but overlay blocks until clicked.
+    # NOTE: No st.stop(); UI renders underneath but overlay blocks until clicked.
+
+# ─────────────────────────────────────────────────────────────
+# Top controls + manual refresh
+# ─────────────────────────────────────────────────────────────
+row_top = st.columns([3, 1])
+with row_top[0]:
+    node = st.selectbox("Node Select", ["Auckland-Orākei"], index=0)
+with row_top[1]:
+    if st.button("🔄 Refresh from Drive now"):
+        st.cache_data.clear()
+        # clear only epoch-dependent keys; DO NOT clear the overlay flag
+        for k in list(st.session_state.keys()):
+            if str(k).startswith(("drive_kids::", "DRIVE_EPOCH", "root_map::", "t1_idx::", "t1_loaded_for::")):
+                del st.session_state[k]
+        st.success("Cache cleared.")
+        st.rerun()
+
 
 
 # ============================================================================
@@ -107,21 +132,7 @@ CUTOFF_NEW  = date(2025, 10, 31)
 # ============================================================================
 # Splash once
 # ============================================================================
-if "splash_done" not in st.session_state:
-    st.session_state["splash_done"] = True
-    st.markdown(
-        """
-        <div class="center-wrap fade-enter">
-          <div>
-            <div class="brand-title">KōreroNET</div>
-            <div class="brand-sub">AUT</div>
-            <div class="small" style="margin-top:10px;">initialising…</div>
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.stop()
+
 
 # ============================================================================
 # Caches & local fallback
