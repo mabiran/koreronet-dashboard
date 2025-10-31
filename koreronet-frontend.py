@@ -1,31 +1,41 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# KōreroNET Dashboard (with splash + Drive)
-# ------------------------------------------------------------
-# - Splash screen (“KōreroNET” + “AUT”) for ~2s, then main UI
-# - Tab 1: Root CSV heatmaps (Drive or local) with calendar + min confidence
-# - Tab 2: Verify using snapshot date (Backup/YYYYMMDD_HHMMSS) and master CSVs;
-#          on-demand audio chunk fetch from Drive (no full directory downloads).
-# - Tab 3: Power graph from "Power logs" (Drive), stitches latest N logs;
-#          dual y-axes: SoC_i (%) and Wh.
-#
-# Streamlit secrets required:
-#   GDRIVE_FOLDER_ID = "your_root_folder_id"
-#   [service_account]
-#   type = "service_account"
-#   project_id = "..."
-#   private_key_id = "..."
-#   private_key = (paste PEM with real newlines, no \n escapes)
-#   client_email = "...@...iam.gserviceaccount.com"
-#   client_id = "..."
-#   auth_uri = "https://accounts.google.com/o/oauth2/auth"
-#   token_uri = "https://oauth2.googleapis.com/token"
-#   auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
-#   client_x509_cert_url = "https://www.googleapis.com/robot/v1/metadata/x509/...."
-#   universe_domain = "googleapis.com"
-# ------------------------------------------------------------
+"""
+Modified KōreroNET Dashboard
+----------------------------
 
-import os, io, re, glob, json, time
+This version of the dashboard adds two major features:
+
+1. **Clickable heatmaps in Tab 1** — The detections heatmap now uses
+   the `streamlit_plotly_events` component to capture cell click events
+   so you can listen to the underlying audio clips.  When you click
+   a species/hour cell, the app looks up the WAV chunks associated
+   with that cell (for new‑format root CSVs) and renders a small
+   player with Prev/Play/Next controls.  Streamlit’s built‑in
+   `st.audio` element is used to play the audio【490288259639174†L169-L187】.
+
+2. **Guided workflow in Tab 1** — Instead of showing all controls at
+   once, the UI now guides the user through the steps: pick a date
+   first, choose a model (KōreroNET, BirdNET or Combined), click
+   “Show results”, and then adjust the confidence slider.  Moving
+   the slider automatically updates the heatmap.
+
+The remainder of the application (tabs for verifying recordings and
+power graphs) stays unchanged from the original version.
+
+To support click events from Plotly charts, this code depends on the
+`streamlit-plotly-events` package.  Install it via pip:
+
+    pip install streamlit-plotly-events
+
+"""
+
+import os
+import io
+import re
+import glob
+import json
+import time
 from pathlib import Path
 from datetime import date, datetime, timedelta
 from typing import Dict, Any, List, Optional, Tuple
@@ -35,6 +45,13 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+
+# Import the Plotly events component.  This custom component exposes
+# click events from Plotly charts back to Streamlit【197812816076401†L276-L316】.
+try:
+    from streamlit_plotly_events import plotly_events
+except Exception:
+    plotly_events = None  # users must install streamlit-plotly-events
 
 # ─────────────────────────────────────────────────────────────
 # Page style
@@ -126,7 +143,7 @@ GDRIVE_FOLDER_ID = st.secrets.get("GDRIVE_FOLDER_ID", None)
 
 def _normalize_private_key(pk: str) -> str:
     if not isinstance(pk, str): return pk
-    if "\\n" in pk: pk = pk.replace("\\n", "\n")
+    if "\n" in pk: pk = pk.replace("\n", "\n")
     if "-----BEGIN PRIVATE KEY-----" in pk and "-----END PRIVATE KEY-----" in pk:
         if "-----BEGIN PRIVATE KEY-----\n" not in pk:
             pk = pk.replace("-----BEGIN PRIVATE KEY-----", "-----BEGIN PRIVATE KEY-----\n", 1)
@@ -202,7 +219,7 @@ def _compute_drive_epoch(root_id: str) -> str:
     # Find Backup/ and look one level deep
     bkid = None
     for k in root_kids:
-        if k.get("mimeType") == "application/vnd.google-apps.folder" and k.get("name","").lower() == "backup":
+        if k.get("mimeType") == "application/vnd.google-apps.folder" and k.get("name","" ).lower() == "backup":
             bkid = k.get("id")
             break
     back_max = ""
@@ -354,6 +371,8 @@ def _std_newformat(df: pd.DataFrame) -> pd.DataFrame:
     out["Label"]       = df.get("Label", "Unknown")
     out["Confidence"]  = pd.to_numeric(df.get("Probability", np.nan), errors="coerce")
     out["ActualTime"]  = pd.to_datetime(df.get("ActualStartTime", pd.NaT), errors="coerce")
+    # keep clip column for audio lookup
+    out["Clip"]        = df.get("Clip", pd.Series([None]*len(df))).astype(str)
     return out.dropna(subset=["Label","ActualTime"])
 
 def _std_legacy(df: pd.DataFrame, kind: str) -> pd.DataFrame:
@@ -365,15 +384,20 @@ def _std_legacy(df: pd.DataFrame, kind: str) -> pd.DataFrame:
         else:
             guess = [c for c in df.columns if "common" in c.lower() and "name" in c.lower()]
             df["Label"] = df[guess[0]] if guess else "Unknown"
+        # legacy BN may have "File" column with wav name
+        df["Clip"] = df.get("File", pd.Series([None]*len(df))).astype(str)
     else:
         if "Label" not in df.columns:
             possible = [c for c in df.columns if c.lower() in ("label","common name","common_name","species","class")]
             df["Label"] = df[possible[0]] if possible else "Unknown"
+        # legacy KN may have "File" column as well
+        df["Clip"] = df.get("File", pd.Series([None]*len(df))).astype(str)
     df["ActualTime"] = pd.to_datetime(df.get("ActualTime", pd.NaT), errors="coerce", dayfirst=True)
     df = df.dropna(subset=["Label", "ActualTime"])
-    return df[["Label", "Confidence", "ActualTime"]]
+    return df[["Label", "Confidence", "ActualTime", "Clip"]]
 
 def standardize_root_df(df: pd.DataFrame, kind: str) -> pd.DataFrame:
+    # keep original columns lower-case for detection
     cols = set(c.lower() for c in df.columns)
     if {"clip","actualstarttime","label","probability"} <= cols:
         return _std_newformat(df)
@@ -411,6 +435,7 @@ def load_csv(path: str | Path) -> pd.DataFrame:
 
 # ============================================================================
 # Snapshot/master logic for Tab 2
+# (unchanged except reused in Tab1 helper below)
 # ============================================================================
 def _sanitize_label(s: str) -> str:
     s = str(s or "")
@@ -437,14 +462,14 @@ def _parse_date_from_snapname(name: str) -> Optional[date]:
 def _find_backup_folder(root_folder_id: str) -> Optional[Dict[str, Any]]:
     kids = list_children(root_folder_id, max_items=2000)
     for k in kids:
-        if k.get("mimeType") == "application/vnd.google-apps.folder" and k.get("name","").lower() == "backup":
+        if k.get("mimeType") == "application/vnd.google-apps.folder" and k.get("name","" ).lower() == "backup":
             return k
     return None
 
 def _find_chunk_dirs(snapshot_id: str) -> Dict[str, str]:
     kids = list_children(snapshot_id, max_items=2000)
-    kn = [k for k in kids if k.get("mimeType")=="application/vnd.google-apps.folder" and "koreronet" in k.get("name","").lower()]
-    bn = [k for k in kids if k.get("mimeType")=="application/vnd.google-apps.folder" and "birdnet"   in k.get("name","").lower()]
+    kn = [k for k in kids if k.get("mimeType")=="application/vnd.google-apps.folder" and "koreronet" in k.get("name","" ).lower()]
+    bn = [k for k in kids if k.get("mimeType")=="application/vnd.google-apps.folder" and "birdnet"   in k.get("name","" ).lower()]
     return {"KN": (kn[0]["id"] if kn else snapshot_id), "BN": (bn[0]["id"] if bn else snapshot_id)}
 
 def _find_named_in_snapshot(snapshot_id: str, exact_name: str) -> Optional[Dict[str, Any]]:
@@ -452,14 +477,14 @@ def _find_named_in_snapshot(snapshot_id: str, exact_name: str) -> Optional[Dict[
     kids = list_children(snapshot_id, max_items=2000)
     files_only = [f for f in kids if f.get("mimeType") != "application/vnd.google-apps.folder"]
     for f in files_only:
-        if f.get("name","").lower() == exact_name.lower():
+        if f.get("name","" ).lower() == exact_name.lower():
             return f
     # look in one-level subfolders
     subfolders = [f for f in kids if f.get("mimeType") == "application/vnd.google-apps.folder"]
     for sf in subfolders:
         sub_files = list_children(sf["id"], max_items=2000)
         for f in sub_files:
-            if f.get("mimeType") != "application/vnd.google-apps.folder" and f.get("name","").lower() == exact_name.lower():
+            if f.get("mimeType") != "application/vnd.google-apps.folder" and f.get("name","" ).lower() == exact_name.lower():
                 return f
     return None
 
@@ -480,7 +505,7 @@ def build_master_index_by_snapshot_date(root_folder_id: str, cache_epoch: str) -
         ])
 
     snaps = [k for k in list_children(backup["id"], max_items=2000)
-             if k.get("mimeType")=="application/vnd.google-apps.folder" and SNAP_RE.match(k.get("name",""))]
+             if k.get("mimeType")=="application/vnd.google-apps.folder" and SNAP_RE.match(k.get("name","" ))]
     snaps.sort(key=lambda m: m.get("name",""), reverse=True)
 
     rows: List[Dict[str,Any]] = []
@@ -500,12 +525,12 @@ def build_master_index_by_snapshot_date(root_folder_id: str, cache_epoch: str) -
                     df = pd.read_csv(kn_csv)
                     # expect Clip, ActualStartTime, Label, Probability
                     for _, r in df.iterrows():
-                        clip  = str(r.get("Clip","")).strip()
+                        clip  = str(r.get("Clip","" )).strip()
                         lab   = str(r.get("Label","Unknown"))
                         conf  = float(r.get("Probability", np.nan))
                         rows.append({
                             "Date": snap_date, "Kind": "KN", "Label": lab, "Confidence": conf,
-                            "Start": np.nan, "End": np.nan, "WavBase": "",   # not needed in new format
+                            "Start": np.nan, "End": np.nan, "WavBase": "",
                             "ChunkName": clip, "ChunkDriveFolderId": chunk_dirs["KN"],
                             "SnapId": snap_id, "SnapName": snap_name,
                         })
@@ -519,7 +544,7 @@ def build_master_index_by_snapshot_date(root_folder_id: str, cache_epoch: str) -
                 try:
                     df = pd.read_csv(bn_csv)
                     for _, r in df.iterrows():
-                        clip  = str(r.get("Clip","")).strip()
+                        clip  = str(r.get("Clip","" )).strip()
                         lab   = str(r.get("Label", r.get("Common name","Unknown")))
                         conf  = float(r.get("Probability", r.get("Confidence", np.nan)))
                         rows.append({
@@ -547,13 +572,13 @@ def build_master_index_by_snapshot_date(root_folder_id: str, cache_epoch: str) -
                             and _match_legacy_master_name(f.get("name",""), "KN")]
                     if cand: kn_legacy = cand; break
             if kn_legacy:
-                kn_legacy.sort(key=lambda m: m.get("modifiedTime",""), reverse=True)
+                kn_legacy.sort(key=lambda m: m.get("modifiedTime","" ), reverse=True)
                 meta = kn_legacy[0]
                 kn_csv = ensure_csv_cached(meta, subdir=f"snap_{snap_id}/koreronet", cache_epoch=cache_epoch)
                 try:
                     df = pd.read_csv(kn_csv)
                     for _, r in df.iterrows():
-                        wav = os.path.basename(str(r.get("File","")))
+                        wav = os.path.basename(str(r.get("File","" )))
                         start = float(r.get("Start", r.get("Start (s)", np.nan)))
                         end   = float(r.get("End",   r.get("End (s)",   np.nan)))
                         lab   = str(r.get("Label","Unknown"))
@@ -577,13 +602,13 @@ def build_master_index_by_snapshot_date(root_folder_id: str, cache_epoch: str) -
                             and _match_legacy_master_name(f.get("name",""), "BN")]
                     if cand: bn_legacy = cand; break
             if bn_legacy:
-                bn_legacy.sort(key=lambda m: m.get("modifiedTime",""), reverse=True)
+                bn_legacy.sort(key=lambda m: m.get("modifiedTime","" ), reverse=True)
                 meta = bn_legacy[0]
                 bn_csv = ensure_csv_cached(meta, subdir=f"snap_{snap_id}/birdnet", cache_epoch=cache_epoch)
                 try:
                     df = pd.read_csv(bn_csv)
                     for _, r in df.iterrows():
-                        wav = os.path.basename(str(r.get("File","")))
+                        wav = os.path.basename(str(r.get("File","" )))
                         start = float(r.get("Start (s)", r.get("Start", np.nan)))
                         end   = float(r.get("End (s)",   r.get("End",   np.nan)))
                         lab   = str(r.get("Common name", r.get("Label","Unknown")))
@@ -609,6 +634,28 @@ def build_master_index_by_snapshot_date(root_folder_id: str, cache_epoch: str) -
     return out
 
 # ============================================================================
+# Helper: build a map from snapshot name and kind to chunk folder id
+# ============================================================================
+def prepare_snap_chunk_map() -> Dict[Tuple[str, str], str]:
+    """
+    Build (and cache) a mapping from (SnapName, Kind) → ChunkDriveFolderId.
+    This allows us to quickly locate the Drive folder containing chunks
+    associated with a given root CSV when computing the heatmap.
+    """
+    if not drive_enabled():
+        return {}
+    if "snap_chunk_map" in st.session_state:
+        return st.session_state["snap_chunk_map"]
+    cache_epoch = st.session_state.get("DRIVE_EPOCH", "0")
+    master = build_master_index_by_snapshot_date(GDRIVE_FOLDER_ID, cache_epoch=cache_epoch)
+    snap_chunk = {}
+    if not master.empty:
+        for _, row in master.iterrows():
+            snap_chunk[(row["SnapName"], row["Kind"])] = row["ChunkDriveFolderId"]
+    st.session_state["snap_chunk_map"] = snap_chunk
+    return snap_chunk
+
+# ============================================================================
 # Tabs
 # ============================================================================
 tab1, tab_verify, tab3 = st.tabs(["📊 Detections", "🎧 Verify recordings", "⚡ Power"])
@@ -617,6 +664,7 @@ tab1, tab_verify, tab3 = st.tabs(["📊 Detections", "🎧 Verify recordings", "
 # TAB 1 — Detections (root)
 # =========================
 with tab1:
+    # Step 1: gather and index CSVs (either from Drive or local)
     center = st.empty()
     with center.container():
         st.markdown('<div class="center-wrap fade-enter"><div>🔎 Checking root CSVs…</div></div>', unsafe_allow_html=True)
@@ -638,6 +686,7 @@ with tab1:
         bn_paths = [Path(p) for p in bn_local]
         kn_paths = [Path(p) for p in kn_local]
 
+    # Build date index across BN and KN
     center.empty(); center = st.empty()
     with center.container():
         st.markdown('<div class="center-wrap"><div>🧮 Building date index…</div></div>', unsafe_allow_html=True)
@@ -649,25 +698,22 @@ with tab1:
     bn_dates = sorted(bn_by_date.keys())
     kn_dates = sorted(kn_by_date.keys())
     paired_dates = sorted(set(bn_dates).intersection(set(kn_dates)))
+    all_dates = sorted(set(bn_dates + kn_dates))
 
-    src = st.selectbox("Source", ["KōreroNET (kn)", "BirdNET (bn)", "Combined"], index=0)
-    min_conf = st.slider("Minimum confidence", 0.0, 1.0, 0.90, 0.01)
+    # Step 2: guided UI — date first, then source, then show results, then slider
+    if not all_dates:
+        st.warning("No available dates for any source.")
+        st.stop()
 
-    if src == "Combined":
-        options, help_txt = paired_dates, "Only dates that have BOTH BN & KN detections."
-    elif src == "BirdNET (bn)":
-        options, help_txt = bn_dates, "Dates present in any BN file."
-    else:
-        options, help_txt = kn_dates, "Dates present in any KN file."
-
-    if not options:
-        st.warning(f"No available dates for {src}."); st.stop()
-
+    # Using session state to persist user selections and show results flag
+    tab1_key_prefix = "tab1"
+    # Date selection
     def calendar_pick(available_days: List[date], label: str, help_txt: str = "") -> date:
         available_days = sorted(available_days)
         d_min, d_max = available_days[0], available_days[-1]
         d_val = st.date_input(label, value=d_max, min_value=d_min, max_value=d_max, help=help_txt)
         if d_val not in set(available_days):
+            # adjust to nearest date
             earlier = [x for x in available_days if x <= d_val]
             if earlier:
                 d_val = earlier[-1]
@@ -678,55 +724,215 @@ with tab1:
                 st.info(f"No data on chosen date; showing {d_val.isoformat()} (nearest later).")
         return d_val
 
-    d = calendar_pick(options, "Day", help_txt)
+    # Step 1: date picker
+    st.subheader("Step 1: Choose a date")
+    picked_date = calendar_pick(all_dates, "Day", "Select a date with available detections.")
+    st.markdown("---")
 
-    def load_and_filter(paths: List[Path], kind: str, day_selected: date):
+    # Step 2: model/source picker — only shown after a date is picked
+    st.subheader("Step 2: Choose a model")
+    source_options = ["KōreroNET (kn)", "BirdNET (bn)", "Combined"]
+    picked_source = st.selectbox("Source", source_options, index=0)
+    st.markdown("---")
+
+    # Determine which files to use based on source and date
+    if picked_source == "Combined":
+        date_options = paired_dates
+    elif picked_source == "BirdNET (bn)":
+        date_options = bn_dates
+    else:
+        date_options = kn_dates
+
+    if picked_date not in date_options:
+        st.info("The selected date is not available for the chosen model. Please choose a date with data or switch model.")
+        st.stop()
+
+    # Step 3: Show results button
+    st.subheader("Step 3: View detections")
+    show_flag_key = f"{tab1_key_prefix}::show_results"  # boolean flag
+    if show_flag_key not in st.session_state:
+        st.session_state[show_flag_key] = False
+    if not st.session_state[show_flag_key]:
+        if st.button("Show results", type="primary", key="tab1_show_btn"):
+            st.session_state[show_flag_key] = True
+            st.experimental_rerun()
+        st.stop()
+
+    # Once show_results is True: display slider and heatmap
+    # Slider for minimum confidence; default previously used value or 0.90
+    conf_key = f"{tab1_key_prefix}::min_conf"
+    if conf_key not in st.session_state:
+        st.session_state[conf_key] = 0.90
+    st.subheader("Step 4: Adjust confidence filter")
+    min_conf = st.slider("Minimum confidence", 0.0, 1.0, st.session_state[conf_key], 0.01, key="tab1_conf_slider")
+    st.session_state[conf_key] = min_conf
+
+    # Load and filter data for the chosen model/date
+    def load_and_filter(paths: List[Path], kind: str, day_selected: date) -> pd.DataFrame:
         frames = []
         for p in paths:
             try:
                 raw = load_csv(p)
                 std = standardize_root_df(raw, kind)
                 std = std[std["ActualTime"].dt.date == day_selected]
-                if not std.empty: frames.append(std)
+                if not std.empty:
+                    # attach path metadata to each row for audio lookup
+                    std = std.copy()
+                    std["__src_path__"] = str(p)
+                    frames.append(std)
             except Exception:
                 pass
         return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
-    if st.button("Show results", type="primary", key="tab1_show_btn"):
-        with st.spinner("Rendering heatmap…"):
-            def make_heatmap(df: pd.DataFrame, min_conf: float, title: str):
-                df_f = df[df["Confidence"].astype(float) >= float(min_conf)].copy()
-                if df_f.empty:
-                    st.warning("No detections after applying the confidence filter.")
-                    return
-                df_f["Hour"] = df_f["ActualTime"].dt.hour
-                hour_labels = {h: f"{(h % 12) or 12} {'AM' if h < 12 else 'PM'}" for h in range(24)}
-                order = [hour_labels[h] for h in range(24)]
-                df_f["HourLabel"] = df_f["Hour"].map(hour_labels)
-                pivot = df_f.groupby(["Label","HourLabel"]).size().unstack(fill_value=0).astype(int)
-                for lbl in order:
-                    if lbl not in pivot.columns: pivot[lbl] = 0
-                pivot = pivot[order]
-                totals = pivot.sum(axis=1)
-                pivot = pivot.loc[totals.sort_values(ascending=False).index]
-                fig = px.imshow(
-                    pivot.values, x=pivot.columns, y=pivot.index,
-                    color_continuous_scale="RdYlBu_r",
-                    labels=dict(x="Hour (AM/PM)", y="Species (label)", color="Detections"),
-                    text_auto=True, aspect="auto", title=title,
-                )
-                fig.update_layout(margin=dict(l=10,r=10,t=50,b=10))
-                fig.update_xaxes(type="category")
-                st.plotly_chart(fig, use_container_width=True)
+    # Determine the list of paths and kind(s)
+    # We'll also need to pass these paths to the heatmap renderer for audio lookup
+    if picked_source == "BirdNET (bn)":
+        data_df = load_and_filter(bn_by_date.get(picked_date, []), "bn", picked_date)
+        paths_used = [Path(p) for p in bn_by_date.get(picked_date, [])]
+        title = f"BirdNET • {picked_date.isoformat()}"
+    elif picked_source == "KōreroNET (kn)":
+        data_df = load_and_filter(kn_by_date.get(picked_date, []), "kn", picked_date)
+        paths_used = [Path(p) for p in kn_by_date.get(picked_date, [])]
+        title = f"KōreroNET • {picked_date.isoformat()}"
+    else:
+        df_bn = load_and_filter(bn_by_date.get(picked_date, []), "bn", picked_date)
+        df_kn = load_and_filter(kn_by_date.get(picked_date, []), "kn", picked_date)
+        data_df = pd.concat([df_bn, df_kn], ignore_index=True)
+        paths_used = [Path(p) for p in bn_by_date.get(picked_date, []) + kn_by_date.get(picked_date, [])]
+        title = f"Combined (BN+KN) • {picked_date.isoformat()}"
 
-            if src == "BirdNET (bn)":
-                make_heatmap(load_and_filter(bn_by_date.get(d, []), "bn", d), min_conf, f"BirdNET • {d.isoformat()}")
-            elif src == "KōreroNET (kn)":
-                make_heatmap(load_and_filter(kn_by_date.get(d, []), "kn", d), min_conf, f"KōreroNET • {d.isoformat()}")
+    if data_df.empty:
+        st.warning("No detections after filtering by date.")
+        st.stop()
+
+    # If streamlit-plotly-events is not installed, warn the user and display plain heatmap
+    if plotly_events is None:
+        st.warning("The `streamlit-plotly-events` package is required for clickable heatmaps. Install it via pip.")
+
+    # Build cell_audio mapping and render heatmap with click interactivity
+    def render_clickable_heatmap(df: pd.DataFrame, min_conf: float, title: str, file_paths: List[Path]):
+        # Filter by confidence
+        df_f = df[pd.to_numeric(df["Confidence"], errors="coerce") >= float(min_conf)].copy()
+        if df_f.empty:
+            st.warning("No detections after applying the confidence filter.")
+            return
+        # Prepare hour labels
+        df_f["Hour"] = df_f["ActualTime"].dt.hour
+        hour_labels = {h: f"{(h % 12) or 12} {'AM' if h < 12 else 'PM'}" for h in range(24)}
+        order = [hour_labels[h] for h in range(24)]
+        df_f["HourLabel"] = df_f["Hour"].map(hour_labels)
+        # Build pivot table for counts
+        pivot = df_f.groupby(["Label","HourLabel"]).size().unstack(fill_value=0).astype(int)
+        for lbl in order:
+            if lbl not in pivot.columns: pivot[lbl] = 0
+        pivot = pivot[order]
+        totals = pivot.sum(axis=1)
+        pivot = pivot.loc[totals.sort_values(ascending=False).index]
+        # Build audio mapping: cell → list of (clip_name, folder_id, kind)
+        cell_audio: Dict[Tuple[str,str], List[Tuple[str,str,str]]] = {}
+        # Prepare snapshot chunk map once
+        snap_chunk_map = prepare_snap_chunk_map() if drive_enabled() else {}
+        # Determine snapshot name from file path and kind
+        for path in file_paths:
+            name = path.name
+            snap_match_bn = NEW_ROOT_BN.match(name)
+            snap_match_kn = NEW_ROOT_KN.match(name)
+            snap_name = None
+            kind_code = None
+            if snap_match_bn:
+                snap_name = name.split("_")[0] + "_" + name.split("_")[1]  # YYYYMMDD_HHMMSS
+                kind_code = "BN"
+            elif snap_match_kn:
+                parts = name.split("_")
+                snap_name = parts[0] + "_" + parts[1]
+                kind_code = "KN"
+            # Only process new-format files; legacy files may not have clips
+            if not snap_name or not kind_code:
+                continue
+            # Determine the chunk folder id for this snapshot/kind
+            chunk_folder = snap_chunk_map.get((snap_name, kind_code)) if snap_chunk_map else None
+            # Filter df_f rows from this file
+            sub_df = df_f[df_f["__src_path__"] == str(path)]
+            for _, row_ in sub_df.iterrows():
+                label = row_["Label"]
+                hl    = row_["HourLabel"]
+                clip  = str(row_.get("Clip","" ))
+                if not clip:
+                    continue
+                # map BN/KN to subdir: bn → "bn", kn → "kn"
+                subdir = kind_code.lower()
+                cell_audio.setdefault((label, hl), []).append((clip, chunk_folder, subdir))
+        # Plot heatmap
+        fig = px.imshow(
+            pivot.values,
+            x=pivot.columns,
+            y=pivot.index,
+            color_continuous_scale="RdYlBu_r",
+            labels=dict(x="Hour (AM/PM)", y="Species (label)", color="Detections"),
+            text_auto=True,
+            aspect="auto",
+            title=title,
+        )
+        fig.update_layout(margin=dict(l=10,r=10,t=50,b=10))
+        fig.update_xaxes(type="category")
+        # If the events component is unavailable, just show the chart
+        if plotly_events is None:
+            st.plotly_chart(fig, use_container_width=True)
+            return
+        # Use plotly_events to capture clicks
+        selected_points = plotly_events(fig, click_event=True)
+        # The component itself renders the chart; no need to call st.plotly_chart
+        # Handle click: selected_points is a list of dicts
+        if selected_points:
+            ev = selected_points[0]
+            hour_label = ev.get("x")
+            label = ev.get("y")
+            # Retrieve audio list
+            audio_list = cell_audio.get((label, hour_label), [])
+            if not audio_list:
+                st.info("No audio available for this cell (legacy CSV or missing clips).")
             else:
-                df_bn = load_and_filter(bn_by_date.get(d, []), "bn", d)
-                df_kn = load_and_filter(kn_by_date.get(d, []), "kn", d)
-                make_heatmap(pd.concat([df_bn, df_kn], ignore_index=True), min_conf, f"Combined (BN+KN) • {d.isoformat()}")
+                # Use session state to maintain index across reruns
+                idx_key = f"hm_idx::{title}::{label}::{hour_label}"
+                if idx_key not in st.session_state:
+                    st.session_state[idx_key] = 0
+                idx = st.session_state[idx_key]
+                # Controls
+                c1, c2, c3, c4 = st.columns([1,1,1,6])
+                autoplay = False
+                with c1:
+                    if st.button("⏮ Prev"):
+                        idx = (idx - 1) % len(audio_list)
+                        autoplay = True
+                with c2:
+                    if st.button("▶ Play"):
+                        autoplay = True
+                with c3:
+                    if st.button("⏭ Next"):
+                        idx = (idx + 1) % len(audio_list)
+                        autoplay = True
+                st.session_state[idx_key] = idx
+                # Display metadata and player
+                st.markdown(f"**Selected** — Species: **{label}**, Hour: **{hour_label}**, File {idx+1}/{len(audio_list)}")
+                clip_name, folder_id, subdir = audio_list[idx]
+                if not folder_id:
+                    st.info("Audio folder unknown; cannot fetch clip.")
+                else:
+                    with st.spinner("Fetching audio…"):
+                        cached = ensure_chunk_cached(clip_name, folder_id, subdir=subdir)
+                    if cached and cached.exists():
+                        try:
+                            with open(cached, "rb") as f:
+                                data = f.read()
+                            # Use autoplay depending on button press
+                            st.audio(data, format="audio/wav", autoplay=autoplay)
+                        except Exception:
+                            st.warning("Cannot open audio chunk.")
+                    else:
+                        st.warning("Audio chunk not found in Drive folder.")
+
+    # Render the heatmap with current min_conf
+    render_clickable_heatmap(data_df, min_conf, title, paths_used)
 
 # ================================
 # TAB 2 — Verify (snapshot date)
@@ -802,8 +1008,8 @@ with tab_verify:
     st.markdown(f"**Date:** {row['Date']}  |  **Chunk:** `{row['ChunkName']}`  |  **Kind:** {row['Kind']}  |  **Confidence:** {float(row['Confidence']):.3f}")
 
     def _play_audio(row_: pd.Series, auto: bool):
-        chunk_name = str(row_.get("ChunkName","") or "")
-        folder_id  = str(row_.get("ChunkDriveFolderId","") or "")
+        chunk_name = str(row_.get("ChunkName","" ) or "")
+        folder_id  = str(row_.get("ChunkDriveFolderId","" ) or "")
         kind       = str(row_.get("Kind","UNK"))
         if not (chunk_name and folder_id):
             st.warning("No chunk mapping available."); return
@@ -837,7 +1043,7 @@ with tab3:
     def find_subfolder_by_name(root_id: str, name_ci: str) -> Optional[Dict[str, Any]]:
         kids = list_children(root_id, max_items=2000)
         for k in kids:
-            if k.get("mimeType")=="application/vnd.google-apps.folder" and k.get("name","").lower()==name_ci.lower():
+            if k.get("mimeType")=="application/vnd.google-apps.folder" and k.get("name","" ).lower()==name_ci.lower():
                 return k
         return None
 
@@ -851,7 +1057,7 @@ with tab3:
     @st.cache_data(show_spinner=True)
     def list_power_logs(folder_id: str, cache_epoch: str) -> List[Dict[str, Any]]:
         kids = list_children(folder_id, max_items=2000)
-        files = [k for k in kids if k.get("mimeType") != "application/vnd.google-apps.folder" and LOG_RE.match(k.get("name",""))]
+        files = [k for k in kids if k.get("mimeType") != "application/vnd.google-apps.folder" and LOG_RE.match(k.get("name","" ))]
         files.sort(key=lambda m: m.get("name",""), reverse=True)
         return files
 
