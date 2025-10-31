@@ -141,13 +141,13 @@ row_top = st.columns([3,1])
 with row_top[0]:
     node = st.selectbox("Node Select", ["Auckland-Orākei"], index=0)
 with row_top[1]:
-if st.button("🔄 Refresh from Drive now"):
-    st.cache_data.clear()
-    for k in list(st.session_state.keys()):
-        if str(k).startswith(("drive_kids::","DRIVE_EPOCH","root_map::","t1_idx::","t1_loaded_for::")):
-            del st.session_state[k]
-    st.success("Cache cleared.")
-    st.rerun()
+    if st.button("🔄 Refresh from Drive now"):
+        st.cache_data.clear()
+        for k in list(st.session_state.keys()):
+            if str(k).startswith(("drive_kids::","DRIVE_EPOCH","root_map::","t1_idx::","t1_loaded_for::")):
+                del st.session_state[k]
+        st.success("Cache cleared.")
+        st.rerun()
 
 
 # ============================================================================
