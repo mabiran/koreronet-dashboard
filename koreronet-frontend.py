@@ -692,61 +692,41 @@ with tab1:
                 pass
         return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
-    if st.button("Show results", type="primary", key="tab3_show_btn"):
-        with st.spinner("Building power time-series (last 7 days)…"):
-            files = list_power_logs(logs_folder["id"], cache_epoch=cache_epoch, nocache=live_token())
-    
-            # Keep everything within the last 7 days
-            window_days = 7
-            cutoff = datetime.now() - timedelta(days=window_days)
-    
-            frames: List[pd.DataFrame] = []
-            for meta in files:  # files are newest → oldest
-                local = ensure_log_cached(meta)
-                df = parse_power_log(local)
-                if df is None or df.empty:
-                    continue
-                # Keep only rows within the window
-                df = df[df["t"] >= cutoff]
-                if df.empty:
-                    # Since list is newest→oldest, once this file contributes nothing,
-                    # older files won't either; safe to stop.
-                    break
-                frames.append(df)
-    
-            ts = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(
-                columns=["t","PH_WH","PH_mAh","PH_SoCi","PH_SoCv"]
-            )
-    
-        if ts.empty:
-            st.warning("No parsable power logs in the last 7 days.")
-        else:
-            # Clean up & summarise
-            ts = ts.drop_duplicates(subset=["t"]).sort_values("t").reset_index(drop=True)
-    
-            # Plot
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=ts["t"], y=ts["PH_SoCi"], mode="lines", name="SoC_i (%)", yaxis="y1"))
-            fig.add_trace(go.Scatter(x=ts["t"], y=ts["PH_WH"],  mode="lines", name="Energy (Wh)", yaxis="y2"))
-            fig.update_layout(
-                title="Power / State of Charge (last 7 days)",
-                xaxis=dict(title="Time"),
-                yaxis=dict(title="SoC (%)", range=[0, 100]),
-                yaxis2=dict(title="Wh", overlaying="y", side="right"),
-                legend=dict(orientation="h"),
-                margin=dict(l=10, r=10, t=50, b=10),
-            )
-            st.plotly_chart(fig, use_container_width=True)
-    
-            # Small caption showing stitched range & points
-            stitched_days = max(1, (ts["t"].max() - ts["t"].min()).days + 1)
-            st.caption(f"Showing last {min(stitched_days, 7)} day(s): {ts['t'].min().date()} → {ts['t'].max().date()} · {len(ts)} points")
-    
-            last = ts.iloc[-1]
-            c1, c2 = st.columns(2)
-            with c1: st.metric("Last SoC_i (%)", f"{last['PH_SoCi']:.1f}")
-            with c2: st.metric("Last Energy (Wh)", f"{last['PH_WH']:.2f}")
+    if st.button("Show results", type="primary", key="tab1_show_btn"):
+        with st.spinner("Rendering heatmap…"):
+            def make_heatmap(df: pd.DataFrame, min_conf: float, title: str):
+                df_f = df[df["Confidence"].astype(float) >= float(min_conf)].copy()
+                if df_f.empty:
+                    st.warning("No detections after applying the confidence filter.")
+                    return
+                df_f["Hour"] = df_f["ActualTime"].dt.hour
+                hour_labels = {h: f"{(h % 12) or 12} {'AM' if h < 12 else 'PM'}" for h in range(24)}
+                order = [hour_labels[h] for h in range(24)]
+                df_f["HourLabel"] = df_f["Hour"].map(hour_labels)
+                pivot = df_f.groupby(["Label","HourLabel"]).size().unstack(fill_value=0).astype(int)
+                for lbl in order:
+                    if lbl not in pivot.columns: pivot[lbl] = 0
+                pivot = pivot[order]
+                totals = pivot.sum(axis=1)
+                pivot = pivot.loc[totals.sort_values(ascending=False).index]
+                fig = px.imshow(
+                    pivot.values, x=pivot.columns, y=pivot.index,
+                    color_continuous_scale="RdYlBu_r",
+                    labels=dict(x="Hour (AM/PM)", y="Species (label)", color="Detections"),
+                    text_auto=True, aspect="auto", title=title,
+                )
+                fig.update_layout(margin=dict(l=10,r=10,t=50,b=10))
+                fig.update_xaxes(type="category")
+                st.plotly_chart(fig, use_container_width=True)
 
+            if src == "BirdNET (bn)":
+                make_heatmap(load_and_filter(bn_by_date.get(d, []), "bn", d), min_conf, f"BirdNET • {d.isoformat()}")
+            elif src == "KōreroNET (kn)":
+                make_heatmap(load_and_filter(kn_by_date.get(d, []), "kn", d), min_conf, f"KōreroNET • {d.isoformat()}")
+            else:
+                df_bn = load_and_filter(bn_by_date.get(d, []), "bn", d)
+                df_kn = load_and_filter(kn_by_date.get(d, []), "kn", d)
+                make_heatmap(pd.concat([df_bn, df_kn], ignore_index=True), min_conf, f"Combined (BN+KN) • {d.isoformat()}")
 
 # ================================
 # TAB 2 — Verify (snapshot date)
@@ -942,14 +922,6 @@ with tab3:
 
         times = [head_dt - timedelta(hours=(L-1 - i)) for i in range(L)]
         df = pd.DataFrame({"t": times, "PH_WH": WH, "PH_mAh": mAh, "PH_SoCi": SoCi, "PH_SoCv": SoCv})
-        eps = 1e-9
-        all_zero_mask = (
-            (np.abs(df["PH_WH"])   < eps) &
-            (np.abs(df["PH_mAh"])  < eps) &
-            (np.abs(df["PH_SoCi"]) < eps) &
-            (np.abs(df["PH_SoCv"]) < eps)
-        )
-        df = df.loc[~all_zero_mask].reset_index(drop=True)
         return df
 
     cache_epoch = st.session_state.get("DRIVE_EPOCH", "0")
@@ -963,8 +935,7 @@ with tab3:
                 if df is not None and not df.empty:
                     frames.append(df)
             ts = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=["t","PH_WH","PH_mAh","PH_SoCi","PH_SoCv"])
-            if not ts.empty:
-                ts = ts.drop_duplicates(subset=["t"]).sort_values("t").reset_index(drop=True)
+
         if ts.empty:
             st.warning("No parsable power logs found.")
         else:
