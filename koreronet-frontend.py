@@ -25,7 +25,7 @@
 #   universe_domain = "googleapis.com"
 # ------------------------------------------------------------
 
-import os, io, re, glob, json, time
+import os, io, re, glob, json, time, uuid
 from pathlib import Path
 from datetime import date, datetime, timedelta
 from typing import Dict, Any, List, Optional, Tuple
@@ -94,6 +94,20 @@ if "splash_done" not in st.session_state:
     st.rerun()
 
 # ============================================================================
+# Utility: unique keys + live toggle
+# ============================================================================
+if "_sess_salt" not in st.session_state:
+    st.session_state["_sess_salt"] = str(uuid.uuid4())[:8]
+
+def k(name: str) -> str:
+    """Unique widget key helper."""
+    return f"{name}::{st.session_state['_sess_salt']}"
+
+def live_token() -> str:
+    """Changes every ~10s when LIVE mode is enabled; 'stable' otherwise."""
+    return f"live::{int(time.time() // 10)}" if st.session_state.get("__LIVE__", False) else "stable"
+
+# ============================================================================
 # Caches & local fallback
 # ============================================================================
 CACHE_ROOT   = Path("/tmp/koreronet_cache")
@@ -106,18 +120,21 @@ for _p in (CSV_CACHE, CHUNK_CACHE, POWER_CACHE):
 DEFAULT_ROOT = r"G:\My Drive\From the node"
 ROOT_LOCAL   = os.getenv("KORERONET_DATA_ROOT", DEFAULT_ROOT)
 
-# Node Select (top bar) + manual refresh
-row_top = st.columns([3,1])
+# Node Select (top bar) + manual refresh + LIVE toggle
+row_top = st.columns([3,1,2])
 with row_top[0]:
     node = st.selectbox("Node Select", ["Auckland-Orākei"], index=0, key="node_select_top")
 with row_top[1]:
-    if st.button("🔄 Refresh from Drive now"):
+    if st.button("🔄 Refresh from Drive now", key=k("btn_refresh_drive")):
         st.cache_data.clear()
-        for k in list(st.session_state.keys()):
-            if str(k).startswith("drive_kids::") or str(k).startswith("DRIVE_EPOCH"):
-                del st.session_state[k]
+        for _k in list(st.session_state.keys()):
+            if str(_k).startswith("drive_kids::") or str(_k).startswith("DRIVE_EPOCH"):
+                del st.session_state[_k]
         st.success("Cache cleared. Reloading…")
         st.rerun()
+with row_top[2]:
+    st.session_state["__LIVE__"] = st.toggle("⚡ Live Drive mode", value=False, key=k("live_toggle"),
+                                             help="Force re-download latest files from Drive (CSV/WAV/log).")
 
 # ============================================================================
 # Secrets / Drive
@@ -186,7 +203,7 @@ def list_children(folder_id: str, max_items: int = 2000) -> List[Dict[str, Any]]
     return items
 
 @st.cache_data(ttl=180, show_spinner=False)
-def _compute_drive_epoch(root_id: str) -> str:
+def _compute_drive_epoch(root_id: str, nocache: str = "stable") -> str:
     """
     Build a short 'epoch' token that changes when new files appear or files update.
     We combine max(modifiedTime) in root and in Backup/ (one-level deep).
@@ -214,7 +231,7 @@ def _compute_drive_epoch(root_id: str) -> str:
 
 def _ensure_epoch_key():
     if not drive_enabled(): return
-    new_epoch = _compute_drive_epoch(GDRIVE_FOLDER_ID)
+    new_epoch = _compute_drive_epoch(GDRIVE_FOLDER_ID, nocache=live_token())
     old_epoch = st.session_state.get("DRIVE_EPOCH", None)
     if old_epoch is None:
         st.session_state["DRIVE_EPOCH"] = new_epoch
@@ -232,10 +249,12 @@ def _folder_children_cached(folder_id: str) -> List[Dict[str, Any]]:
         st.session_state[key] = list_children(folder_id, max_items=2000)
     return st.session_state[key]
 
-def download_to(path: Path, file_id: str) -> Path:
+def download_to(path: Path, file_id: str, force: bool = False) -> Path:
     drive = get_drive_client()
     from googleapiclient.http import MediaIoBaseDownload
     path.parent.mkdir(parents=True, exist_ok=True)
+    if (not force) and path.exists():
+        return path
     req = drive.files().get_media(fileId=file_id)
     with open(path, "wb") as fh:
         downloader = MediaIoBaseDownload(fh, req)
@@ -244,26 +263,24 @@ def download_to(path: Path, file_id: str) -> Path:
             _, done = downloader.next_chunk()
     return path
 
-def ensure_csv_cached(meta: Dict[str, Any], subdir: str, cache_epoch: str = "") -> Path:
+def ensure_csv_cached(meta: Dict[str, Any], subdir: str, cache_epoch: str = "", force: bool = False) -> Path:
     local_path = (CSV_CACHE / subdir / meta["name"])
-    if not local_path.exists():
-        download_to(local_path, meta["id"])
-    return local_path
+    return download_to(local_path, meta["id"], force=force)
 
-def ensure_chunk_cached(chunk_name: str, folder_id: str, subdir: str) -> Optional[Path]:
+def ensure_chunk_cached(chunk_name: str, folder_id: str, subdir: str, force: bool = False) -> Optional[Path]:
     """
     Try exact name first. If missing, fuzzy-match by (root, tag, label) and choose
     the chunk whose [s,e] window contains the requested [s_t,e_t] (±0.75s tolerance).
     """
     local_path = CHUNK_CACHE / subdir / chunk_name
-    if local_path.exists():
+    if (not force) and local_path.exists():
         return local_path
 
     kids = _folder_children_cached(folder_id)
     name_to_id = {k.get("name"): k.get("id") for k in kids}
     if chunk_name in name_to_id:
         try:
-            download_to(local_path, name_to_id[chunk_name])
+            download_to(local_path, name_to_id[chunk_name], force=force)
             return local_path
         except Exception:
             return None
@@ -299,7 +316,7 @@ def ensure_chunk_cached(chunk_name: str, folder_id: str, subdir: str) -> Optiona
     candidates.sort(key=lambda it: score(it[0]))
     best_info, best_id, best_name = candidates[0]
     try:
-        download_to(local_path, best_id)
+        download_to(local_path, best_id, force=force)
         st.caption(f"⚠️ Used fuzzy match: requested `{chunk_name}` → found `{best_name}`")
         return local_path
     except Exception:
@@ -334,7 +351,7 @@ def list_csvs_local(root: str) -> Tuple[List[str], List[str]]:
     return bn_paths, kn_paths
 
 @st.cache_data(show_spinner=False)
-def list_csvs_drive_root(folder_id: str, cache_epoch: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+def list_csvs_drive_root(folder_id: str, cache_epoch: str, nocache: str = "stable") -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     kids = list_children(folder_id, max_items=2000)
     bn, kn = [], []
     for k in kids:
@@ -471,7 +488,7 @@ def _match_legacy_master_name(name: str, kind: str) -> bool:
         return (("birdnet" in n) and ("detect" in n) and n.endswith(".csv"))
 
 @st.cache_data(show_spinner=True)
-def build_master_index_by_snapshot_date(root_folder_id: str, cache_epoch: str) -> pd.DataFrame:
+def build_master_index_by_snapshot_date(root_folder_id: str, cache_epoch: str, nocache: str = "stable") -> pd.DataFrame:
     backup = _find_backup_folder(root_folder_id)
     if not backup:
         return pd.DataFrame(columns=[
@@ -495,7 +512,7 @@ def build_master_index_by_snapshot_date(root_folder_id: str, cache_epoch: str) -
             # koreronet_master.csv
             kn_meta = _find_named_in_snapshot(snap_id, "koreronet_master.csv")
             if kn_meta:
-                kn_csv = ensure_csv_cached(kn_meta, subdir=f"snap_{snap_id}/koreronet", cache_epoch=cache_epoch)
+                kn_csv = ensure_csv_cached(kn_meta, subdir=f"snap_{snap_id}/koreronet", cache_epoch=cache_epoch, force=st.session_state.get("__LIVE__", False))
                 try:
                     df = pd.read_csv(kn_csv)
                     # expect Clip, ActualStartTime, Label, Probability
@@ -515,7 +532,7 @@ def build_master_index_by_snapshot_date(root_folder_id: str, cache_epoch: str) -
             # birdnet_master.csv
             bn_meta = _find_named_in_snapshot(snap_id, "birdnet_master.csv")
             if bn_meta:
-                bn_csv = ensure_csv_cached(bn_meta, subdir=f"snap_{snap_id}/birdnet", cache_epoch=cache_epoch)
+                bn_csv = ensure_csv_cached(bn_meta, subdir=f"snap_{snap_id}/birdnet", cache_epoch=cache_epoch, force=st.session_state.get("__LIVE__", False))
                 try:
                     df = pd.read_csv(bn_csv)
                     for _, r in df.iterrows():
@@ -549,7 +566,7 @@ def build_master_index_by_snapshot_date(root_folder_id: str, cache_epoch: str) -
             if kn_legacy:
                 kn_legacy.sort(key=lambda m: m.get("modifiedTime",""), reverse=True)
                 meta = kn_legacy[0]
-                kn_csv = ensure_csv_cached(meta, subdir=f"snap_{snap_id}/koreronet", cache_epoch=cache_epoch)
+                kn_csv = ensure_csv_cached(meta, subdir=f"snap_{snap_id}/koreronet", cache_epoch=cache_epoch, force=st.session_state.get("__LIVE__", False))
                 try:
                     df = pd.read_csv(kn_csv)
                     for _, r in df.iterrows():
@@ -579,7 +596,7 @@ def build_master_index_by_snapshot_date(root_folder_id: str, cache_epoch: str) -
             if bn_legacy:
                 bn_legacy.sort(key=lambda m: m.get("modifiedTime",""), reverse=True)
                 meta = bn_legacy[0]
-                bn_csv = ensure_csv_cached(meta, subdir=f"snap_{snap_id}/birdnet", cache_epoch=cache_epoch)
+                bn_csv = ensure_csv_cached(meta, subdir=f"snap_{snap_id}/birdnet", cache_epoch=cache_epoch, force=st.session_state.get("__LIVE__", False))
                 try:
                     df = pd.read_csv(bn_csv)
                     for _, r in df.iterrows():
@@ -623,16 +640,18 @@ with tab1:
 
     cache_epoch = st.session_state.get("DRIVE_EPOCH", "0")
     if drive_enabled():
-        bn_meta, kn_meta = list_csvs_drive_root(GDRIVE_FOLDER_ID, cache_epoch=cache_epoch)
+        bn_meta, kn_meta = list_csvs_drive_root(GDRIVE_FOLDER_ID, cache_epoch=cache_epoch, nocache=live_token())
     else:
         bn_meta, kn_meta = [], []
 
+    # Download / use local
+    force_live = st.session_state.get("__LIVE__", False)
     if drive_enabled() and (bn_meta or kn_meta):
         center.empty(); center = st.empty()
         with center.container():
             st.markdown('<div class="center-wrap"><div>⬇️ Downloading root CSVs…</div></div>', unsafe_allow_html=True)
-        bn_paths = [ensure_csv_cached(m, subdir="root/bn", cache_epoch=cache_epoch) for m in bn_meta]
-        kn_paths = [ensure_csv_cached(m, subdir="root/kn", cache_epoch=cache_epoch) for m in kn_meta]
+        bn_paths = [ensure_csv_cached(m, subdir="root/bn", cache_epoch=cache_epoch, force=force_live) for m in bn_meta]
+        kn_paths = [ensure_csv_cached(m, subdir="root/kn", cache_epoch=cache_epoch, force=force_live) for m in kn_meta]
     else:
         bn_local, kn_local = list_csvs_local(ROOT_LOCAL)
         bn_paths = [Path(p) for p in bn_local]
@@ -650,8 +669,8 @@ with tab1:
     kn_dates = sorted(kn_by_date.keys())
     paired_dates = sorted(set(bn_dates).intersection(set(kn_dates)))
 
-    src = st.selectbox("Source", ["KōreroNET (kn)", "BirdNET (bn)", "Combined"], index=0)
-    min_conf = st.slider("Minimum confidence", 0.0, 1.0, 0.90, 0.01)
+    src = st.selectbox("Source", ["KōreroNET (kn)", "BirdNET (bn)", "Combined"], index=0, key=k("tab1_src"))
+    min_conf = st.slider("Minimum confidence", 0.0, 1.0, 0.90, 0.01, key=k("tab1_min_conf"))
 
     if src == "Combined":
         options, help_txt = paired_dates, "Only dates that have BOTH BN & KN detections."
@@ -666,7 +685,7 @@ with tab1:
     def calendar_pick(available_days: List[date], label: str, help_txt: str = "") -> date:
         available_days = sorted(available_days)
         d_min, d_max = available_days[0], available_days[-1]
-        d_val = st.date_input(label, value=d_max, min_value=d_min, max_value=d_max, help=help_txt)
+        d_val = st.date_input(label, value=d_max, min_value=d_min, max_value=d_max, help=help_txt, key=k("tab1_day"))
         if d_val not in set(available_days):
             earlier = [x for x in available_days if x <= d_val]
             if earlier:
@@ -692,33 +711,33 @@ with tab1:
                 pass
         return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
-    if st.button("Show results", type="primary", key="tab1_show_btn"):
-        with st.spinner("Rendering heatmap…"):
-            def make_heatmap(df: pd.DataFrame, min_conf: float, title: str):
-                df_f = df[df["Confidence"].astype(float) >= float(min_conf)].copy()
-                if df_f.empty:
-                    st.warning("No detections after applying the confidence filter.")
-                    return
-                df_f["Hour"] = df_f["ActualTime"].dt.hour
-                hour_labels = {h: f"{(h % 12) or 12} {'AM' if h < 12 else 'PM'}" for h in range(24)}
-                order = [hour_labels[h] for h in range(24)]
-                df_f["HourLabel"] = df_f["Hour"].map(hour_labels)
-                pivot = df_f.groupby(["Label","HourLabel"]).size().unstack(fill_value=0).astype(int)
-                for lbl in order:
-                    if lbl not in pivot.columns: pivot[lbl] = 0
-                pivot = pivot[order]
-                totals = pivot.sum(axis=1)
-                pivot = pivot.loc[totals.sort_values(ascending=False).index]
-                fig = px.imshow(
-                    pivot.values, x=pivot.columns, y=pivot.index,
-                    color_continuous_scale="RdYlBu_r",
-                    labels=dict(x="Hour (AM/PM)", y="Species (label)", color="Detections"),
-                    text_auto=True, aspect="auto", title=title,
-                )
-                fig.update_layout(margin=dict(l=10,r=10,t=50,b=10))
-                fig.update_xaxes(type="category")
-                st.plotly_chart(fig, use_container_width=True)
+    def make_heatmap(df: pd.DataFrame, min_conf: float, title: str):
+        df_f = df[pd.to_numeric(df["Confidence"], errors="coerce").astype(float) >= float(min_conf)].copy()
+        if df_f.empty:
+            st.warning("No detections after applying the confidence filter.")
+            return
+        df_f["Hour"] = df_f["ActualTime"].dt.hour
+        hour_labels = {h: f"{(h % 12) or 12} {'AM' if h < 12 else 'PM'}" for h in range(24)}
+        order = [hour_labels[h] for h in range(24)]
+        df_f["HourLabel"] = df_f["Hour"].map(hour_labels)
+        pivot = df_f.groupby(["Label","HourLabel"]).size().unstack(fill_value=0).astype(int)
+        for lbl in order:
+            if lbl not in pivot.columns: pivot[lbl] = 0
+        pivot = pivot[order]
+        totals = pivot.sum(axis=1)
+        pivot = pivot.loc[totals.sort_values(ascending=False).index]
+        fig = px.imshow(
+            pivot.values, x=pivot.columns, y=pivot.index,
+            color_continuous_scale="RdYlBu_r",
+            labels=dict(x="Hour (AM/PM)", y="Species (label)", color="Detections"),
+            text_auto=True, aspect="auto", title=title,
+        )
+        fig.update_layout(margin=dict(l=10,r=10,t=50,b=10))
+        fig.update_xaxes(type="category")
+        st.plotly_chart(fig, use_container_width=True)
 
+    if st.button("Show results", type="primary", key=k("tab1_show_btn")):
+        with st.spinner("Rendering heatmap…"):
             if src == "BirdNET (bn)":
                 make_heatmap(load_and_filter(bn_by_date.get(d, []), "bn", d), min_conf, f"BirdNET • {d.isoformat()}")
             elif src == "KōreroNET (kn)":
@@ -740,7 +759,7 @@ with tab_verify:
         st.markdown('<div class="center-wrap fade-enter"><div>📚 Indexing master CSVs by snapshot date…</div></div>', unsafe_allow_html=True)
 
     cache_epoch = st.session_state.get("DRIVE_EPOCH", "0")
-    master = build_master_index_by_snapshot_date(GDRIVE_FOLDER_ID, cache_epoch=cache_epoch)
+    master = build_master_index_by_snapshot_date(GDRIVE_FOLDER_ID, cache_epoch=cache_epoch, nocache=live_token())
     center2.empty()
 
     if master.empty:
@@ -749,9 +768,9 @@ with tab_verify:
 
     colA, colB = st.columns([2,1])
     with colA:
-        src_mode_v = st.selectbox("Source", ["KōreroNET (KN)", "BirdNET (BN)", "Combined"], index=0)
+        src_mode_v = st.selectbox("Source", ["KōreroNET (KN)", "BirdNET (BN)", "Combined"], index=0, key=k("tab2_src"))
     with colB:
-        min_conf_v = st.slider("Min confidence", 0.0, 1.0, 0.90, 0.01)
+        min_conf_v = st.slider("Min confidence", 0.0, 1.0, 0.90, 0.01, key=k("tab2_min_conf"))
 
     if src_mode_v == "KōreroNET (KN)":
         pool = master[master["Kind"]=="KN"]
@@ -766,7 +785,7 @@ with tab_verify:
     avail_days = sorted(pool["Date"].unique())
     def calendar_pick_days(days: List[date], label: str) -> date:
         days = sorted(days)
-        return st.date_input(label, value=days[-1], min_value=days[0], max_value=days[-1])
+        return st.date_input(label, value=days[-1], min_value=days[0], max_value=days[-1], key=k("tab2_day"))
     day_pick = calendar_pick_days(list(avail_days), "Day")
 
     day_df = pool[pool["Date"] == day_pick]
@@ -791,11 +810,11 @@ with tab_verify:
     col1, col2, col3, col4 = st.columns([1,1,1,6])
     autoplay = False
     with col1:
-        if st.button("⏮ Prev"): idx = (idx - 1) % len(playlist); autoplay = True
+        if st.button("⏮ Prev", key=k("tab2_prev")): idx = (idx - 1) % len(playlist); autoplay = True
     with col2:
-        if st.button("▶ Play"): autoplay = True
+        if st.button("▶ Play", key=k("tab2_play")): autoplay = True
     with col3:
-        if st.button("⏭ Next"): idx = (idx + 1) % len(playlist); autoplay = True
+        if st.button("⏭ Next", key=k("tab2_next")): idx = (idx + 1) % len(playlist); autoplay = True
     st.session_state[idx_key] = idx
 
     row = playlist.iloc[idx]
@@ -809,7 +828,7 @@ with tab_verify:
             st.warning("No chunk mapping available."); return
         subdir = f"{kind}"
         with st.spinner("Fetching audio…"):
-            cached = ensure_chunk_cached(chunk_name, folder_id, subdir=subdir)
+            cached = ensure_chunk_cached(chunk_name, folder_id, subdir=subdir, force=st.session_state.get("__LIVE__", False))
         if not cached or not cached.exists():
             st.warning("Audio chunk not found in Drive folder."); return
         try:
@@ -849,18 +868,16 @@ with tab3:
     LOG_RE = re.compile(r"^power_history_(\d{8})_(\d{6})\.log$", re.IGNORECASE)
 
     @st.cache_data(show_spinner=True)
-    def list_power_logs(folder_id: str, cache_epoch: str) -> List[Dict[str, Any]]:
+    def list_power_logs(folder_id: str, cache_epoch: str, nocache: str = "stable") -> List[Dict[str, Any]]:
         kids = list_children(folder_id, max_items=2000)
         files = [k for k in kids if k.get("mimeType") != "application/vnd.google-apps.folder" and LOG_RE.match(k.get("name",""))]
         files.sort(key=lambda m: m.get("name",""), reverse=True)
         return files
 
     @st.cache_data(show_spinner=False)
-    def ensure_log_cached(meta: Dict[str, Any]) -> Path:
+    def ensure_log_cached(meta: Dict[str, Any], force: bool = False) -> Path:
         local_path = POWER_CACHE / meta["name"]
-        if not local_path.exists():
-            download_to(local_path, meta["id"])
-        return local_path
+        return download_to(local_path, meta["id"], force=force)
 
     def _parse_float_list(line: str) -> List[float]:
         try:
@@ -922,6 +939,8 @@ with tab3:
 
         times = [head_dt - timedelta(hours=(L-1 - i)) for i in range(L)]
         df = pd.DataFrame({"t": times, "PH_WH": WH, "PH_mAh": mAh, "PH_SoCi": SoCi, "PH_SoCv": SoCv})
+
+        # Drop rows where all four series are ~0 (node off)
         eps = 1e-9
         all_zero_mask = (
             (np.abs(df["PH_WH"])   < eps) &
@@ -933,33 +952,56 @@ with tab3:
         return df
 
     cache_epoch = st.session_state.get("DRIVE_EPOCH", "0")
-    if st.button("Show results", type="primary", key="tab3_show_btn"):
-        with st.spinner("Building power time-series…"):
-            files = list_power_logs(logs_folder["id"], cache_epoch=cache_epoch)
+    if st.button("Show results", type="primary", key=k("tab3_show_btn")):
+        with st.spinner("Building power time-series (last 7 days)…"):
+            files = list_power_logs(logs_folder["id"], cache_epoch=cache_epoch, nocache=live_token())
+
+            # Keep everything within the last 7 days
+            window_days = 7
+            cutoff = datetime.now() - timedelta(days=window_days)
+
             frames: List[pd.DataFrame] = []
-            for meta in files[:2]:
-                local = ensure_log_cached(meta)
+            for meta in files:  # files are newest → oldest
+                local = ensure_log_cached(meta, force=st.session_state.get("__LIVE__", False))
                 df = parse_power_log(local)
-                if df is not None and not df.empty:
-                    frames.append(df)
-            ts = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=["t","PH_WH","PH_mAh","PH_SoCi","PH_SoCv"])
-            if not ts.empty:
-                ts = ts.drop_duplicates(subset=["t"]).sort_values("t").reset_index(drop=True)
+                if df is None or df.empty:
+                    continue
+                # Keep only rows within the window
+                df = df[df["t"] >= cutoff]
+                if df.empty:
+                    # Since list is newest→oldest, once this file contributes nothing,
+                    # older files won't either; safe to stop.
+                    break
+                frames.append(df)
+
+            ts = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(
+                columns=["t","PH_WH","PH_mAh","PH_SoCi","PH_SoCv"]
+            )
+
         if ts.empty:
-            st.warning("No parsable power logs found.")
+            st.warning("No parsable power logs in the last 7 days.")
         else:
+            # Clean up & summarise
+            ts = ts.drop_duplicates(subset=["t"]).sort_values("t").reset_index(drop=True)
+
+            # Plot
             fig = go.Figure()
             fig.add_trace(go.Scatter(x=ts["t"], y=ts["PH_SoCi"], mode="lines", name="SoC_i (%)", yaxis="y1"))
             fig.add_trace(go.Scatter(x=ts["t"], y=ts["PH_WH"],  mode="lines", name="Energy (Wh)", yaxis="y2"))
             fig.update_layout(
-                title="Power / State of Charge over time",
+                title="Power / State of Charge (last 7 days)",
                 xaxis=dict(title="Time"),
-                yaxis=dict(title="SoC (%)", range=[0,100]),
+                yaxis=dict(title="SoC (%)", range=[0, 100]),
                 yaxis2=dict(title="Wh", overlaying="y", side="right"),
                 legend=dict(orientation="h"),
                 margin=dict(l=10, r=10, t=50, b=10),
             )
             st.plotly_chart(fig, use_container_width=True)
+
+            # Caption showing stitched range & points
+            stitched_days = max(1, (ts["t"].max() - ts["t"].min()).days + 1)
+            st.caption(f"Showing last {min(stitched_days, 7)} day(s): {ts['t'].min().date()} → {ts['t'].max().date()} · {len(ts)} points")
+
             last = ts.iloc[-1]
             c1, c2 = st.columns(2)
             with c1: st.metric("Last SoC_i (%)", f"{last['PH_SoCi']:.1f}")
