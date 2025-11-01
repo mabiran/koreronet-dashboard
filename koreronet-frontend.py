@@ -1090,96 +1090,139 @@ def ensure_raw_cached(meta: Dict[str, Any], force: bool = False) -> Path:
 # ============================================================================
 tab_nodes, tab1, tab_verify, tab3, tab4 = st.tabs(["🗺️ Nodes", "📊 Detections", "🎧 Verify recordings", "⚡ Power", "📝 log"])
 
+# ==================================
+# TAB — Nodes (stable map fallback)
+# ==================================
 with tab_nodes:
-    st.subheader("Choose a node on the map")
+    st.subheader("Choose a node")
 
-    # Build a small DataFrame for plotly
+    # Build DataFrame for map layers
     _df_nodes = pd.DataFrame(
         [{"lat": n["lat"], "lon": n["lon"], "name": n["name"], "key": n["key"], "desc": n["desc"]} for n in NODES]
     )
 
-    # --- BIG DOT + HALO ---
-# --- BIG DOT + HALO ---
-# --- BIG DOT + HALO ---
-# --- BIG DOT + HALO (outline simulated with two traces) ---
-fig_nodes = go.Figure()
-
-# Coerce to plain lists
-lat_list  = _df_nodes["lat"].astype(float).tolist()
-lon_list  = _df_nodes["lon"].astype(float).tolist()
-name_list = _df_nodes["name"].astype(str).tolist()
-key_list  = _df_nodes["key"].astype(str).tolist()
-desc_list = _df_nodes["desc"].astype(str).tolist()
-
-# 1) Soft halo
-fig_nodes.add_trace(go.Scattermapbox(
-    lat=lat_list,
-    lon=lon_list,
-    mode="markers",
-    marker=dict(size=44, color="rgba(255,0,0,0.18)"),
-    hoverinfo="skip",
-    showlegend=False,
-))
-
-# 2a) Fake outline: bigger white dot underneath
-fig_nodes.add_trace(go.Scattermapbox(
-    lat=lat_list,
-    lon=lon_list,
-    mode="markers",
-    marker=dict(size=32, color="white", opacity=1.0),
-    hoverinfo="skip",
-    showlegend=False,
-))
-
-# 2b) Main clickable crimson dot + label
-fig_nodes.add_trace(go.Scattermapbox(
-    lat=lat_list,
-    lon=lon_list,
-    mode="markers+text",
-    marker=dict(size=28, color="crimson", opacity=0.95),
-    text=name_list,
-    textposition="top center",
-    textfont=dict(size=14),
-    customdata=key_list,        # used to retrieve node key on click
-    hovertext=desc_list,
-    hoverinfo="text",
-    showlegend=False,
-))
-
-# Center/zoom
-center_lat = float(_df_nodes["lat"].mean()) if not _df_nodes.empty else -36.8528
-center_lon = float(_df_nodes["lon"].mean()) if not _df_nodes.empty else 174.8150
-fig_nodes.update_layout(
-    mapbox_style="open-street-map",
-    mapbox=dict(center=dict(lat=center_lat, lon=center_lon), zoom=12),
-    margin=dict(l=0, r=0, t=0, b=0),
-    height=520,
-    showlegend=False,
-)
-
-# Render / capture clicks
-if plotly_events is not None:
-    click = plotly_events(fig_nodes, click_event=True, hover_event=False, select_event=False, key=k("node_map"))
-    # ... same click handling as before
-else:
-    st.plotly_chart(fig_nodes, use_container_width=True)
-    st.info("Install `streamlit-plotly-events` to enable click selection: `pip install streamlit-plotly-events`")
-
-
-
-
-    # Status + apply
+    # --- Selection UI (stable, no click hooks) ---
     current_node = st.session_state.get("node_select_top", NODE_KEYS[0])
-    cols = st.columns([2, 3, 2])
-    with cols[0]:
-        st.write(f"**Current node:** {current_node}")
-    with cols[1]:
-        st.caption("Click the big dot to select a node.") if not selected_key else st.success(f"Selected on map: {selected_key}")
-    with cols[2]:
-        if st.button("Set as active node", disabled=not bool(selected_key), key=k("apply_node_from_map")) and selected_key:
-            st.session_state["node_select_top"] = selected_key
-            st.success(f"Active node set to: {selected_key}")
-            st.rerun()
+    node = st.selectbox("Active node", NODE_KEYS, index=NODE_KEYS.index(current_node))
+    set_col1, set_col2 = st.columns([1,4])
+    with set_col1:
+        if st.button("Set as active node", key=k("apply_node_box")):
+            st.session_state["node_select_top"] = node
+            st.success(f"Active node set to: {node}")
+
+    # Center on chosen node
+    try:
+        _center = _df_nodes[_df_nodes["key"] == node][["lat","lon"]].iloc[0].to_dict()
+        center_lat, center_lon = float(_center["lat"]), float(_center["lon"])
+    except Exception:
+        center_lat, center_lon = -36.8528, 174.8150
+
+    # --- Render map (tiered fallback) ---
+    rendered = False
+
+    # 1) Folium (best stability)
+    if not rendered:
+        try:
+            import folium
+            from streamlit_folium import st_folium
+
+            m = folium.Map(location=[center_lat, center_lon], zoom_start=12, control_scale=True, tiles="OpenStreetMap")
+
+            # soft halo (big translucent)
+            for _, r in _df_nodes.iterrows():
+                folium.Circle(
+                    location=[float(r["lat"]), float(r["lon"])],
+                    radius=150, color=None, fill=True, fill_opacity=0.18, fill_color="#ff0000"
+                ).add_to(m)
+
+            # main marker with “outline” look using CircleMarker twice
+            for _, r in _df_nodes.iterrows():
+                # white underlay
+                folium.CircleMarker(
+                    location=[float(r["lat"]), float(r["lon"])],
+                    radius=16, color=None, fill=True, fill_color="#ffffff", fill_opacity=1.0,
+                ).add_to(m)
+                # crimson dot
+                folium.CircleMarker(
+                    location=[float(r["lat"]), float(r["lon"])],
+                    radius=14, color=None, fill=True, fill_color="#dc143c", fill_opacity=0.95,
+                    tooltip=f"{r['name']}\n{r['desc']}"
+                ).add_to(m)
+
+            st_folium(m, width=None, height=520)
+            rendered = True
+        except Exception:
+            rendered = False
+
+    # 2) pydeck (good stability)
+    if not rendered:
+        try:
+            import pydeck as pdk
+            layer_halo = pdk.Layer(
+                "ScatterplotLayer",
+                data=_df_nodes,
+                get_position='[lon, lat]',
+                get_radius=180,
+                get_fill_color='[255,0,0,46]',  # translucent halo
+                pickable=False,
+            )
+            layer_white = pdk.Layer(
+                "ScatterplotLayer",
+                data=_df_nodes,
+                get_position='[lon, lat]',
+                get_radius=24,
+                get_fill_color='[255,255,255,255]',
+                pickable=False,
+            )
+            layer_main = pdk.Layer(
+                "ScatterplotLayer",
+                data=_df_nodes,
+                get_position='[lon, lat]',
+                get_radius=20,
+                get_fill_color='[220,20,60,242]',
+                pickable=True,
+                getTooltip='"name"',
+            )
+            view_state = pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=12, pitch=0, bearing=0)
+            st.pydeck_chart(pdk.Deck(layers=[layer_halo, layer_white, layer_main], initial_view_state=view_state, map_style=None))
+            rendered = True
+        except Exception:
+            rendered = False
+
+    # 3) Plain Plotly scatter (always works; no basemap)
+    if not rendered:
+        import plotly.graph_objects as go
+        fig = go.Figure()
+        # soft halo
+        fig.add_trace(go.Scatter(
+            x=_df_nodes["lon"].tolist(), y=_df_nodes["lat"].tolist(),
+            mode="markers",
+            marker=dict(size=30, color="rgba(255,0,0,0.18)"),
+            hoverinfo="skip", showlegend=False,
+        ))
+        # white underlay
+        fig.add_trace(go.Scatter(
+            x=_df_nodes["lon"].tolist(), y=_df_nodes["lat"].tolist(),
+            mode="markers",
+            marker=dict(size=22, color="white"),
+            hoverinfo="skip", showlegend=False,
+        ))
+        # main dot + label
+        fig.add_trace(go.Scatter(
+            x=_df_nodes["lon"].tolist(), y=_df_nodes["lat"].tolist(),
+            mode="markers+text",
+            marker=dict(size=18, color="crimson"),
+            text=_df_nodes["name"].tolist(),
+            textposition="top center",
+            hovertext=_df_nodes["desc"].tolist(),
+            hoverinfo="text",
+            showlegend=False,
+        ))
+        fig.update_layout(
+            title=None, xaxis_title="Longitude", yaxis_title="Latitude",
+            height=520, margin=dict(l=0, r=0, t=10, b=0)
+        )
+        st.plotly_chart(fig, use_container_width=True)
 
 
 
