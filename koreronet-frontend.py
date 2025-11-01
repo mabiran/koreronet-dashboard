@@ -124,6 +124,7 @@ CHUNK_RE = re.compile(
 NEW_ROOT_BN = re.compile(r"^\d{8}_\d{6}_birdnet_master\.csv$", re.IGNORECASE)
 NEW_ROOT_KN = re.compile(r"^\d{8}_\d{6}_koreronet_master\.csv$", re.IGNORECASE)
 SNAP_RE     = re.compile(r"^(\d{8})_(\d{6})$", re.IGNORECASE)
+LOG_AUTOSTART_RE = re.compile(r"^(\d{8})_(\d{6})__gui_autostart\.log$", re.IGNORECASE)
 CUTOFF_NEW  = date(2025, 10, 31)  # new format becomes active on/after this date
 
 # ============================================================================
@@ -1063,11 +1064,28 @@ def _render_welcome_overlay():
 
 # Show the overlay once per session (after splash, before tabs)
 _render_welcome_overlay()
+@st.cache_data(show_spinner=False)
+def list_autostart_logs(raw_folder_id: str, cache_epoch: str, nocache: str = "stable") -> List[Dict[str, Any]]:
+    """Return files under /Power logs/raw matching *__gui_autostart.log, newest first."""
+    kids = list_children(raw_folder_id, max_items=2000)
+    files = [k for k in kids
+             if k.get("mimeType") != "application/vnd.google-apps.folder"
+             and LOG_AUTOSTART_RE.match(k.get("name",""))]
+    # Prefer filename sort (timestamp is baked in); fall back to modifiedTime if needed
+    files.sort(key=lambda m: (m.get("name",""), m.get("modifiedTime","")), reverse=True)
+    return files
+
+@st.cache_data(show_spinner=False)
+def ensure_raw_cached(meta: Dict[str, Any], force: bool = False) -> Path:
+    """Download a raw log file to the POWER_CACHE folder."""
+    local_path = POWER_CACHE / meta["name"]
+    return download_to(local_path, meta["id"], force=force)
 
 # ============================================================================
 # Tabs
 # ============================================================================
-tab1, tab_verify, tab3 = st.tabs(["📊 Detections", "🎧 Verify recordings", "⚡ Power"])
+tab1, tab_verify, tab3, tab4 = st.tabs(["📊 Detections", "🎧 Verify recordings", "⚡ Power", "📝 log"])
+
 
 # =========================
 # TAB 1 — Detections (root)
@@ -1519,3 +1537,81 @@ with tab3:
             c1, c2 = st.columns(2)
             with c1: st.metric("Last SoC_i (%)", f"{last['PH_SoCi']:.1f}")
             with c2: st.metric("Last Energy (Wh)", f"{last['PH_WH']:.2f}")
+# ================================
+# TAB 4 — GUI autostart log tail
+# ================================
+with tab4:
+    st.subheader("GUI Autostart — latest log (tail 500)")
+    if not drive_enabled():
+        st.error("Google Drive is not configured in secrets."); st.stop()
+
+    # Locate: From the node / Power logs / raw
+    # (Your Drive root is the GDRIVE_FOLDER_ID; “From the node” is already your root clone)
+    power_folder = find_subfolder_by_name(GDRIVE_FOLDER_ID, "Power logs")
+    if not power_folder:
+        st.warning("Could not find 'Power logs' under the Drive root.")
+        st.stop()
+
+    raw_folder = find_subfolder_by_name(power_folder["id"], "raw")
+    if not raw_folder:
+        st.warning("Could not find 'raw' inside 'Power logs'.")
+        st.stop()
+
+    cache_epoch = st.session_state.get("DRIVE_EPOCH", "0")
+    files = list_autostart_logs(raw_folder["id"], cache_epoch=cache_epoch)
+
+    colA, colB = st.columns([1,3])
+    with colA:
+        do_refresh = st.button("🔄 Refresh", key=k("tab4_refresh"))
+    if do_refresh:
+        # force cache bust by clearing and re-running
+        st.cache_data.clear()
+        st.rerun()
+
+    if not files:
+        st.info("No files matching `*__gui_autostart.log` were found in Power logs/raw.")
+        st.stop()
+
+    latest = files[0]  # already newest first
+    local = ensure_raw_cached(latest, force=False)
+
+    # Tail last 500 lines efficiently (avoid loading huge logs)
+    def tail_lines(path: Path, max_lines: int = 500, block_size: int = 8192) -> List[str]:
+        try:
+            with open(path, "rb") as f:
+                f.seek(0, os.SEEK_END)
+                end = f.tell()
+                lines: List[bytes] = []
+                buf = b""
+                while end > 0 and len(lines) <= max_lines:
+                    read_size = min(block_size, end)
+                    end -= read_size
+                    f.seek(end, os.SEEK_SET)
+                    chunk = f.read(read_size)
+                    buf = chunk + buf
+                    parts = buf.split(b"\n")
+                    # keep the first partial; count full lines from the end
+                    buf = parts[0]
+                    lines_chunk = parts[1:]
+                    lines = lines_chunk + lines
+                # Convert to text and take the tail
+                text_lines = b"\n".join(lines).decode("utf-8", errors="replace").splitlines()
+                return text_lines[-max_lines:]
+        except Exception as e:
+            return [f"[tail error] {e!s}"]
+
+    lines = tail_lines(local, max_lines=500)
+
+    # Header info + download
+    fn = latest.get("name","(unknown)")
+    st.caption(f"Showing last 500 lines of: `{fn}`")
+    try:
+        with open(local, "rb") as _fh:
+            st.download_button("Download full log", _fh, file_name=fn, mime="text/plain", key=k("dl_gui_log"))
+    except Exception:
+        pass
+
+    # Display with line numbers
+    numbered = "\n".join(f"{i+1:>4}  {line}" for i, line in enumerate(lines))
+    st.code(numbered, language="log")
+
