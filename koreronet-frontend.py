@@ -1158,13 +1158,6 @@ fig_nodes.update_layout(
 )
 
 
-    fig_nodes.update_layout(
-        mapbox_style="open-street-map",
-        mapbox=dict(center=dict(lat=center_lat, lon=center_lon), zoom=11),
-        margin=dict(l=0, r=0, t=0, b=0),
-        height=520,
-        showlegend=False,
-    )
 
     # If streamlit-plotly-events is available, capture click; else just show the map.
     selected_key = None
