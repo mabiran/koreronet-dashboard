@@ -1100,29 +1100,30 @@ with tab_nodes:
 
     # --- BIG DOT + HALO ---
 # --- BIG DOT + HALO ---
+# --- BIG DOT + HALO ---
 fig_nodes = go.Figure()
 
-# Coerce to plain lists (avoid pandas Series surprises)
-lat_list = _df_nodes["lat"].astype(float).tolist()
-lon_list = _df_nodes["lon"].astype(float).tolist()
+# Coerce to plain lists (avoid pandas dtypes)
+lat_list  = _df_nodes["lat"].astype(float).tolist()
+lon_list  = _df_nodes["lon"].astype(float).tolist()
 name_list = _df_nodes["name"].astype(str).tolist()
-key_list = _df_nodes["key"].astype(str).tolist()
+key_list  = _df_nodes["key"].astype(str).tolist()
 desc_list = _df_nodes["desc"].astype(str).tolist()
 
-# 1) Soft halo (no nested dicts inside marker)
+# 1) Soft halo
 fig_nodes.add_trace(go.Scattermapbox(
     lat=lat_list,
     lon=lon_list,
     mode="markers",
     marker=go.scattermapbox.Marker(
         size=44,
-        color="rgba(255,0,0,0.18)",  # transparent red halo
+        color="rgba(255,0,0,0.18)",
     ),
     hoverinfo="skip",
     showlegend=False,
 ))
 
-# 2) Main clickable dot (use typed Line object)
+# 2) Main clickable dot — use dict for line (works across Plotly 5/6)
 fig_nodes.add_trace(go.Scattermapbox(
     lat=lat_list,
     lon=lon_list,
@@ -1131,10 +1132,7 @@ fig_nodes.add_trace(go.Scattermapbox(
         size=28,
         color="crimson",
         opacity=0.95,
-        line=go.scattermapbox.marker.Line(
-            width=3,
-            color="white",
-        ),
+        line=dict(width=3, color="white"),  # <-- changed
     ),
     text=name_list,
     textposition="top center",
@@ -1145,10 +1143,8 @@ fig_nodes.add_trace(go.Scattermapbox(
     showlegend=False,
 ))
 
-# Center/zoom (unchanged)
 center_lat = float(_df_nodes["lat"].mean()) if not _df_nodes.empty else -36.8528
 center_lon = float(_df_nodes["lon"].mean()) if not _df_nodes.empty else 174.8150
-
 fig_nodes.update_layout(
     mapbox_style="open-street-map",
     mapbox=dict(center=dict(lat=center_lat, lon=center_lon), zoom=12),
@@ -1157,13 +1153,13 @@ fig_nodes.update_layout(
     showlegend=False,
 )
 
-# If streamlit-plotly-events is available, keep your click handling as-is.
 if plotly_events is not None:
     click = plotly_events(fig_nodes, click_event=True, hover_event=False, select_event=False, key=k("node_map"))
-    # ... (rest of your selection code)
+    # ... your click handling
 else:
     st.plotly_chart(fig_nodes, use_container_width=True)
     st.info("Install `streamlit-plotly-events` to enable click selection: `pip install streamlit-plotly-events`")
+
 
 
     # Status + apply
