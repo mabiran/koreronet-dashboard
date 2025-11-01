@@ -110,6 +110,39 @@ st.markdown("""
 /* Hide any empty elements inside overlay so they don't render as a fat pill */
 .overlay-card :where(p,div,span):empty { display: none !important; }
 
+/*
+ * Features grid styles for the welcome overlay. This layout is inspired by
+ * the rectangular technology highlight cards on the Hark website. Each
+ * feature consists of a small icon and a brief description. The grid
+ * automatically wraps based on screen width and keeps spacing consistent.
+ */
+.features-grid {
+  display: grid;
+  /* Adjust the minimum column width to ensure cards wrap nicely on narrow screens */
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 1rem;
+  margin-top: 1rem;
+}
+.feature-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.65rem;
+  /* A subtle translucent background to delineate each card */
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 12px;
+  padding: 0.75rem 0.9rem;
+}
+.feature-icon {
+  font-size: 1.4rem;
+  line-height: 1.4rem;
+}
+.feature-text {
+  font-size: 1rem;
+  line-height: 1.3rem;
+  flex: 1;
+}
+
 /* Also hide Streamlit's status/decoration bars just in case */
 [data-testid="stHeader"] { background: transparent !important; }
 [data-testid="stDecoration"] { display: none !important; }
@@ -1035,8 +1068,46 @@ def _render_welcome_overlay():
     # Soft gate: show overlay, skip rendering tabs until user continues
     overlay = st.empty()
     with overlay.container():
+        # Start of overlay card
         st.markdown('<div class="overlay-card">', unsafe_allow_html=True)
-        st.markdown('<div class="overlay-title">KōreroNET — Latest Field Summary</div>', unsafe_allow_html=True)
+        # Heading for the overlay: include both technology and summary sections
+        st.markdown('<div class="overlay-title">KōreroNET — Field Overview</div>', unsafe_allow_html=True)
+        
+        # ------------------------------------------------------------------
+        # Technology highlights
+        # ------------------------------------------------------------------
+        # Introduce a subheading for our technology showcase
+        st.markdown('<div class="overlay-sub">Our Technology Highlights</div>', unsafe_allow_html=True)
+        # Define a set of features (icon, description). Icons use emoji for
+        # broad browser support without external assets. Feel free to tweak or
+        # extend this list – these represent the core capabilities of the
+        # bioacoustic monitoring platform.
+        features: List[Tuple[str, str]] = [
+            ('🔊', 'Bioacoustic monitoring of all vocal species in New Zealand wildlife.'),
+            ('🎧', 'Full-spectrum recording: ultrasonic and audible ranges.'),
+            ('🤖', 'Autonomous detection powered by our in‑house AI models.'),
+            ('🎛️', 'On‑device edge computing and recording in a single package.'),
+            ('📡', 'Deployable in remote areas with flexible connectivity.'),
+            ('📶', 'Supports LoRaWAN, Wi‑Fi and LTE networking.'),
+            ('☀️', 'Solar‑powered and weather‑sealed for harsh environments.'),
+            ('⚡', 'Energy‑efficient: records and processes in intervals to save power.'),
+            ('🐦', 'Detects both pests and birds of interest.'),
+            ('📁', 'Provides accessible recordings of species of interest.')
+        ]
+        # Build the HTML for the grid of feature cards
+        feature_html = '<div class="features-grid">'
+        for icon, text in features:
+            feature_html += f'<div class="feature-card"><div class="feature-icon">{icon}</div><div class="feature-text">{text}</div></div>'
+        feature_html += '</div>'
+        st.markdown(feature_html, unsafe_allow_html=True)
+        
+        # Separator before the summary section
+        st.markdown('<hr style="border:0; border-top:1px solid #444; margin:1.5rem 0; opacity:0.4;">', unsafe_allow_html=True)
+        
+        # ------------------------------------------------------------------
+        # Latest field summary
+        # ------------------------------------------------------------------
+        st.markdown('<div class="overlay-sub">Latest Field Summary</div>', unsafe_allow_html=True)
         if df is None or df.empty or chosen_date is None:
             st.markdown('<div class="overlay-sub">No parsable detections found in the most recent root CSVs.</div>', unsafe_allow_html=True)
         else:
@@ -1055,13 +1126,15 @@ def _render_welcome_overlay():
                 <div class="overlay-pill">Detections: {total:,}</div>
                 <div class="overlay-pill">Species: {uniq:,}</div>
             """, unsafe_allow_html=True)
-        #st.divider()
+        
+        # Action row with continue button
         c1, c2 = st.columns([1,5])
         with c1:
             if st.button("Continue →", type="primary", key=k("welcome_continue")):
                 st.session_state["__welcome_done__"] = True
                 st.rerun()
 
+        # Close overlay-card wrapper
         st.markdown('</div>', unsafe_allow_html=True)
     # Block tabs on first paint
     st.stop()
