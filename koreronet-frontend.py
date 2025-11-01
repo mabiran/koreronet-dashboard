@@ -63,6 +63,7 @@ def _retry(exceptions=(Exception,), tries=3, base_delay=0.35, max_delay=1.2, jit
 st.set_page_config(page_title="KōreroNET Dashboard", layout="wide")
 st.markdown("""
 <style>
+
 [data-testid="stDecoration"] { display: none !important; }
 .block-container {padding-top:1rem; padding-bottom:1rem;}
 .center-wrap {display:flex; align-items:center; justify-content:center; min-height:65vh; text-align:center;}
@@ -101,6 +102,14 @@ st.markdown("""
 
 /* Make any <hr> or dividers inside overlays transparent, just in case */
 .overlay-card hr { border: 0; height: 0; }
+/* Hide any empty elements inside overlay so they don't render as a fat pill */
+.overlay-card :where(p,div,span):empty { display: none !important; }
+
+/* Also hide Streamlit's status/decoration bars just in case */
+[data-testid="stHeader"] { background: transparent !important; }
+[data-testid="stDecoration"] { display: none !important; }
+[data-testid="stStatusWidget"] { display: none !important; }
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -288,7 +297,7 @@ def download_to(path: Path, file_id: str, force: bool = False) -> Path:
 @st.cache_data(ttl=180, show_spinner=False)
 @_retry()
 def _compute_drive_epoch(root_id: str, nocache: str = "stable") -> str:
-    ...
+    #...
 
     drive = get_drive_client()
     if not drive: return "no-drive"
