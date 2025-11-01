@@ -1101,9 +1101,10 @@ with tab_nodes:
     # --- BIG DOT + HALO ---
 # --- BIG DOT + HALO ---
 # --- BIG DOT + HALO ---
+# --- BIG DOT + HALO (outline simulated with two traces) ---
 fig_nodes = go.Figure()
 
-# Coerce to plain lists (avoid pandas dtypes)
+# Coerce to plain lists
 lat_list  = _df_nodes["lat"].astype(float).tolist()
 lon_list  = _df_nodes["lon"].astype(float).tolist()
 name_list = _df_nodes["name"].astype(str).tolist()
@@ -1115,34 +1116,37 @@ fig_nodes.add_trace(go.Scattermapbox(
     lat=lat_list,
     lon=lon_list,
     mode="markers",
-    marker=go.scattermapbox.Marker(
-        size=44,
-        color="rgba(255,0,0,0.18)",
-    ),
+    marker=dict(size=44, color="rgba(255,0,0,0.18)"),
     hoverinfo="skip",
     showlegend=False,
 ))
 
-# 2) Main clickable dot — use dict for line (works across Plotly 5/6)
+# 2a) Fake outline: bigger white dot underneath
+fig_nodes.add_trace(go.Scattermapbox(
+    lat=lat_list,
+    lon=lon_list,
+    mode="markers",
+    marker=dict(size=32, color="white", opacity=1.0),
+    hoverinfo="skip",
+    showlegend=False,
+))
+
+# 2b) Main clickable crimson dot + label
 fig_nodes.add_trace(go.Scattermapbox(
     lat=lat_list,
     lon=lon_list,
     mode="markers+text",
-    marker=go.scattermapbox.Marker(
-        size=28,
-        color="crimson",
-        opacity=0.95,
-        line=dict(width=3, color="white"),  # <-- changed
-    ),
+    marker=dict(size=28, color="crimson", opacity=0.95),
     text=name_list,
     textposition="top center",
     textfont=dict(size=14),
-    customdata=key_list,
+    customdata=key_list,        # used to retrieve node key on click
     hovertext=desc_list,
     hoverinfo="text",
     showlegend=False,
 ))
 
+# Center/zoom
 center_lat = float(_df_nodes["lat"].mean()) if not _df_nodes.empty else -36.8528
 center_lon = float(_df_nodes["lon"].mean()) if not _df_nodes.empty else 174.8150
 fig_nodes.update_layout(
@@ -1153,12 +1157,14 @@ fig_nodes.update_layout(
     showlegend=False,
 )
 
+# Render / capture clicks
 if plotly_events is not None:
     click = plotly_events(fig_nodes, click_event=True, hover_event=False, select_event=False, key=k("node_map"))
-    # ... your click handling
+    # ... same click handling as before
 else:
     st.plotly_chart(fig_nodes, use_container_width=True)
     st.info("Install `streamlit-plotly-events` to enable click selection: `pip install streamlit-plotly-events`")
+
 
 
 
