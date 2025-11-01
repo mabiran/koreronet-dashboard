@@ -39,6 +39,11 @@ import streamlit as st
 import functools
 import random
 
+try:
+    from streamlit_plotly_events import plotly_events
+except Exception:
+    plotly_events = None  # graceful fallback
+
 def _retry(exceptions=(Exception,), tries=3, base_delay=0.35, max_delay=1.2, jitter=0.25):
     """Simple retry decorator with jittered backoff."""
     def deco(fn):
@@ -126,6 +131,18 @@ NEW_ROOT_KN = re.compile(r"^\d{8}_\d{6}_koreronet_master\.csv$", re.IGNORECASE)
 SNAP_RE     = re.compile(r"^(\d{8})_(\d{6})$", re.IGNORECASE)
 LOG_AUTOSTART_RE = re.compile(r"^(\d{8})_(\d{6})__gui_autostart\.log$", re.IGNORECASE)
 CUTOFF_NEW  = date(2025, 10, 31)  # new format becomes active on/after this date
+# Preset field nodes (extend as you add sites)
+NODES = [
+    {
+        "key": "Auckland-Orākei",
+        "name": "Auckland — Orākei",
+        "lat": -36.8528,     # approx Orākei
+        "lon": 174.8150,
+        "desc": "Primary demo node in Orākei, Auckland",
+    },
+    # Add more nodes here as needed...
+]
+NODE_KEYS = [n["key"] for n in NODES]
 
 # ============================================================================
 # Splash
@@ -1084,7 +1101,77 @@ def ensure_raw_cached(meta: Dict[str, Any], force: bool = False) -> Path:
 # ============================================================================
 # Tabs
 # ============================================================================
-tab1, tab_verify, tab3, tab4 = st.tabs(["📊 Detections", "🎧 Verify recordings", "⚡ Power", "📝 log"])
+tab_nodes, tab1, tab_verify, tab3, tab4 = st.tabs(["🗺️ Nodes", "📊 Detections", "🎧 Verify recordings", "⚡ Power", "📝 log"])
+
+with tab_nodes:
+    st.subheader("Choose a node on the map")
+
+    # Build a small DataFrame for plotly
+    _df_nodes = pd.DataFrame(
+        [{"lat": n["lat"], "lon": n["lon"], "name": n["name"], "key": n["key"], "desc": n["desc"]} for n in NODES]
+    )
+
+    # Scattermapbox (no Mapbox token needed with "open-street-map")
+    fig_nodes = go.Figure(go.Scattermapbox(
+        lat=_df_nodes["lat"],
+        lon=_df_nodes["lon"],
+        mode="markers+text",
+        marker=dict(size=16),
+        text=_df_nodes["name"],
+        textposition="top center",
+        customdata=_df_nodes["key"],  # we’ll read this on click
+        hovertext=_df_nodes["desc"],
+        hoverinfo="text",
+    ))
+    # Center/zoom to encompass all points
+    center_lat = float(_df_nodes["lat"].mean()) if not _df_nodes.empty else -36.8528
+    center_lon = float(_df_nodes["lon"].mean()) if not _df_nodes.empty else 174.8150
+
+    fig_nodes.update_layout(
+        mapbox_style="open-street-map",
+        mapbox=dict(center=dict(lat=center_lat, lon=center_lon), zoom=11),
+        margin=dict(l=0, r=0, t=0, b=0),
+        height=520,
+        showlegend=False,
+    )
+
+    # If streamlit-plotly-events is available, capture click; else just show the map.
+    selected_key = None
+    if plotly_events is not None:
+        click = plotly_events(fig_nodes, click_event=True, hover_event=False, select_event=False, key=k("node_map"))
+        if click:
+            # click[0] contains point info; prefer customdata if present
+            cd = click[0].get("customdata")
+            if cd:
+                selected_key = str(cd)
+            else:
+                # fallback: match lat/lon to find node
+                try:
+                    i = int(click[0].get("pointIndex", 0))
+                    selected_key = _df_nodes.iloc[i]["key"]
+                except Exception:
+                    selected_key = None
+    else:
+        st.plotly_chart(fig_nodes, use_container_width=True)
+        st.info("Install `streamlit-plotly-events` to enable click selection: `pip install streamlit-plotly-events`")
+
+    # Show current/selected node + apply button
+    current_node = st.session_state.get("node_select_top", NODE_KEYS[0])
+    cols = st.columns([2, 3, 2])
+    with cols[0]:
+        st.write(f"**Current node:** {current_node}")
+    with cols[1]:
+        if selected_key:
+            st.success(f"Selected on map: {selected_key}")
+        else:
+            st.caption("Click a pin to select a node.")
+    with cols[2]:
+        disabled = not bool(selected_key)
+        if st.button("Set as active node", disabled=disabled, key=k("apply_node_from_map")) and selected_key:
+            # Update the global Node Select widget and rerun
+            st.session_state["node_select_top"] = selected_key
+            st.success(f"Active node set to: {selected_key}")
+            st.rerun()
 
 
 # =========================
