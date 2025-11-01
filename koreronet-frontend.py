@@ -1101,23 +1101,36 @@ with tab_nodes:
         [{"lat": n["lat"], "lon": n["lon"], "name": n["name"], "key": n["key"], "desc": n["desc"]} for n in NODES]
     )
 
-    # --- Selection UI (stable, no click hooks) ---
-    current_node = st.session_state.get("node_select_top", NODE_KEYS[0])
-    node = st.selectbox("Active node", NODE_KEYS, index=NODE_KEYS.index(current_node))
-    set_col1, set_col2 = st.columns([1,4])
+    # ---------- Stable selection state ----------
+    # Use a dedicated app-state key for the chosen node (do NOT reuse widget keys)
+    if "active_node" not in st.session_state:
+        st.session_state["active_node"] = st.session_state.get("node_select_top", NODE_KEYS[0])
+
+    # Selection widget (has its own unique key)
+    node_choice = st.selectbox(
+        "Active node",
+        NODE_KEYS,
+        index=NODE_KEYS.index(st.session_state["active_node"]) if st.session_state["active_node"] in NODE_KEYS else 0,
+        key=k("node_select_choice"),
+    )
+
+    set_col1, set_col2 = st.columns([1, 4])
     with set_col1:
         if st.button("Set as active node", key=k("apply_node_box")):
-            st.session_state["node_select_top"] = node
-            st.success(f"Active node set to: {node}")
+            # Update ONLY our app-state key(s); avoid writing into widget keys
+            st.session_state["active_node"] = node_choice
+            st.session_state["node_select_top"] = node_choice  # keep backwards-compat if other tabs read this
+            st.success(f"Active node set to: {node_choice}")
+            st.rerun()
 
-    # Center on chosen node
+    # Center on active node
     try:
-        _center = _df_nodes[_df_nodes["key"] == node][["lat","lon"]].iloc[0].to_dict()
+        _center = _df_nodes[_df_nodes["key"] == st.session_state["active_node"]][["lat", "lon"]].iloc[0].to_dict()
         center_lat, center_lon = float(_center["lat"]), float(_center["lon"])
     except Exception:
         center_lat, center_lon = -36.8528, 174.8150
 
-    # --- Render map (tiered fallback) ---
+    # ---------- Render map (tiered fallback) ----------
     rendered = False
 
     # 1) Folium (best stability)
@@ -1126,27 +1139,44 @@ with tab_nodes:
             import folium
             from streamlit_folium import st_folium
 
-            m = folium.Map(location=[center_lat, center_lon], zoom_start=12, control_scale=True, tiles="OpenStreetMap")
+            m = folium.Map(
+                location=[center_lat, center_lon],
+                zoom_start=12,
+                control_scale=True,
+                tiles="OpenStreetMap",
+            )
 
             # soft halo (big translucent)
             for _, r in _df_nodes.iterrows():
                 folium.Circle(
                     location=[float(r["lat"]), float(r["lon"])],
-                    radius=150, color=None, fill=True, fill_opacity=0.18, fill_color="#ff0000"
+                    radius=150,
+                    color=None,
+                    fill=True,
+                    fill_opacity=0.18,
+                    fill_color="#ff0000",
                 ).add_to(m)
 
-            # main marker with “outline” look using CircleMarker twice
+            # main marker with “outline” look using two CircleMarkers
             for _, r in _df_nodes.iterrows():
                 # white underlay
                 folium.CircleMarker(
                     location=[float(r["lat"]), float(r["lon"])],
-                    radius=16, color=None, fill=True, fill_color="#ffffff", fill_opacity=1.0,
+                    radius=16,
+                    color=None,
+                    fill=True,
+                    fill_color="#ffffff",
+                    fill_opacity=1.0,
                 ).add_to(m)
                 # crimson dot
                 folium.CircleMarker(
                     location=[float(r["lat"]), float(r["lon"])],
-                    radius=14, color=None, fill=True, fill_color="#dc143c", fill_opacity=0.95,
-                    tooltip=f"{r['name']}\n{r['desc']}"
+                    radius=14,
+                    color=None,
+                    fill=True,
+                    fill_color="#dc143c",
+                    fill_opacity=0.95,
+                    tooltip=f"{r['name']}\n{r['desc']}",
                 ).add_to(m)
 
             st_folium(m, width=None, height=520)
@@ -1158,12 +1188,13 @@ with tab_nodes:
     if not rendered:
         try:
             import pydeck as pdk
+
             layer_halo = pdk.Layer(
                 "ScatterplotLayer",
                 data=_df_nodes,
                 get_position='[lon, lat]',
                 get_radius=180,
-                get_fill_color='[255,0,0,46]',  # translucent halo
+                get_fill_color='[255, 0, 0, 46]',  # translucent halo
                 pickable=False,
             )
             layer_white = pdk.Layer(
@@ -1171,7 +1202,7 @@ with tab_nodes:
                 data=_df_nodes,
                 get_position='[lon, lat]',
                 get_radius=24,
-                get_fill_color='[255,255,255,255]',
+                get_fill_color='[255, 255, 255, 255]',
                 pickable=False,
             )
             layer_main = pdk.Layer(
@@ -1179,12 +1210,17 @@ with tab_nodes:
                 data=_df_nodes,
                 get_position='[lon, lat]',
                 get_radius=20,
-                get_fill_color='[220,20,60,242]',
+                get_fill_color='[220, 20, 60, 242]',
                 pickable=True,
-                getTooltip='"name"',
             )
             view_state = pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=12, pitch=0, bearing=0)
-            st.pydeck_chart(pdk.Deck(layers=[layer_halo, layer_white, layer_main], initial_view_state=view_state, map_style=None))
+            deck = pdk.Deck(
+                layers=[layer_halo, layer_white, layer_main],
+                initial_view_state=view_state,
+                map_style=None,  # no token required
+                tooltip={"text": "{name}\n{desc}"},  # <-- correct place for tooltip in pydeck
+            )
+            st.pydeck_chart(deck)
             rendered = True
         except Exception:
             rendered = False
@@ -1194,37 +1230,49 @@ with tab_nodes:
         import plotly.graph_objects as go
         fig = go.Figure()
         # soft halo
-        fig.add_trace(go.Scatter(
-            x=_df_nodes["lon"].tolist(), y=_df_nodes["lat"].tolist(),
-            mode="markers",
-            marker=dict(size=30, color="rgba(255,0,0,0.18)"),
-            hoverinfo="skip", showlegend=False,
-        ))
+        fig.add_trace(
+            go.Scatter(
+                x=_df_nodes["lon"].tolist(),
+                y=_df_nodes["lat"].tolist(),
+                mode="markers",
+                marker=dict(size=30, color="rgba(255,0,0,0.18)"),
+                hoverinfo="skip",
+                showlegend=False,
+            )
+        )
         # white underlay
-        fig.add_trace(go.Scatter(
-            x=_df_nodes["lon"].tolist(), y=_df_nodes["lat"].tolist(),
-            mode="markers",
-            marker=dict(size=22, color="white"),
-            hoverinfo="skip", showlegend=False,
-        ))
+        fig.add_trace(
+            go.Scatter(
+                x=_df_nodes["lon"].tolist(),
+                y=_df_nodes["lat"].tolist(),
+                mode="markers",
+                marker=dict(size=22, color="white"),
+                hoverinfo="skip",
+                showlegend=False,
+            )
+        )
         # main dot + label
-        fig.add_trace(go.Scatter(
-            x=_df_nodes["lon"].tolist(), y=_df_nodes["lat"].tolist(),
-            mode="markers+text",
-            marker=dict(size=18, color="crimson"),
-            text=_df_nodes["name"].tolist(),
-            textposition="top center",
-            hovertext=_df_nodes["desc"].tolist(),
-            hoverinfo="text",
-            showlegend=False,
-        ))
+        fig.add_trace(
+            go.Scatter(
+                x=_df_nodes["lon"].tolist(),
+                y=_df_nodes["lat"].tolist(),
+                mode="markers+text",
+                marker=dict(size=18, color="crimson"),
+                text=_df_nodes["name"].tolist(),
+                textposition="top center",
+                hovertext=_df_nodes["desc"].tolist(),
+                hoverinfo="text",
+                showlegend=False,
+            )
+        )
         fig.update_layout(
-            title=None, xaxis_title="Longitude", yaxis_title="Latitude",
-            height=520, margin=dict(l=0, r=0, t=10, b=0)
+            title=None,
+            xaxis_title="Longitude",
+            yaxis_title="Latitude",
+            height=520,
+            margin=dict(l=0, r=0, t=10, b=0),
         )
         st.plotly_chart(fig, use_container_width=True)
-
-
 
 # =========================
 # TAB 1 — Detections (root)
