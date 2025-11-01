@@ -1601,6 +1601,10 @@ with tab4:
             return [f"[tail error] {e!s}"]
 
     lines = tail_lines(local, max_lines=500)
+    lines = list(reversed(lines))  # newest first
+    numbered = "\n".join(f"{i+1:>4}  {line}" for i, line in enumerate(lines))
+    st.code(numbered, language="log")
+
 
     # Header info + download
     fn = latest.get("name","(unknown)")
