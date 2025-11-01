@@ -1112,20 +1112,51 @@ with tab_nodes:
     )
 
     # Scattermapbox (no Mapbox token needed with "open-street-map")
-    fig_nodes = go.Figure(go.Scattermapbox(
-        lat=_df_nodes["lat"],
-        lon=_df_nodes["lon"],
-        mode="markers+text",
-        marker=dict(size=16),
-        text=_df_nodes["name"],
-        textposition="top center",
-        customdata=_df_nodes["key"],  # we’ll read this on click
-        hovertext=_df_nodes["desc"],
-        hoverinfo="text",
-    ))
-    # Center/zoom to encompass all points
-    center_lat = float(_df_nodes["lat"].mean()) if not _df_nodes.empty else -36.8528
-    center_lon = float(_df_nodes["lon"].mean()) if not _df_nodes.empty else 174.8150
+    # --- BIG DOT + HALO ---
+fig_nodes = go.Figure()
+
+# 1) Soft halo so the pin stands out on any background
+fig_nodes.add_trace(go.Scattermapbox(
+    lat=_df_nodes["lat"],
+    lon=_df_nodes["lon"],
+    mode="markers",
+    marker=dict(
+        size=44,                 # <- big halo
+        color="rgba(255,0,0,0.18)",  # translucent halo
+    ),
+    hoverinfo="skip",
+    showlegend=False,
+))
+
+# 2) Main clickable dot (thick white outline)
+fig_nodes.add_trace(go.Scattermapbox(
+    lat=_df_nodes["lat"],
+    lon=_df_nodes["lon"],
+    mode="markers+text",
+    marker=dict(
+        size=28,                 # <- BIG dot
+        color="crimson",
+        line=dict(width=3, color="white"),  # high-contrast outline
+    ),
+    text=_df_nodes["name"],
+    textposition="top center",
+    textfont=dict(size=14),
+    customdata=_df_nodes["key"],           # used for click → node key
+    hovertext=_df_nodes["desc"],
+    hoverinfo="text",
+    showlegend=False,
+))
+
+# Center/zoom
+center_lat = float(_df_nodes["lat"].mean()) if not _df_nodes.empty else -36.8528
+center_lon = float(_df_nodes["lon"].mean()) if not _df_nodes.empty else 174.8150
+fig_nodes.update_layout(
+    mapbox_style="open-street-map",
+    mapbox=dict(center=dict(lat=center_lat, lon=center_lon), zoom=12),  # a touch closer
+    margin=dict(l=0, r=0, t=0, b=0),
+    height=520,
+)
+
 
     fig_nodes.update_layout(
         mapbox_style="open-street-map",
