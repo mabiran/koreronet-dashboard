@@ -1301,7 +1301,7 @@ with tab1:
     paired_dates = sorted(set(bn_dates).intersection(set(kn_dates)))
 
     src = st.selectbox("Source", ["KōreroNET (kn)", "BirdNET (bn)", "Combined"], index=0, key=k("tab1_src"))
-    min_conf = st.slider("Minimum confidence", 0.0, 1.0, 0.90, 0.01, key=k("tab1_min_conf"))
+    min_conf = st.slider("Minimum confidence", 0.0, 1.0, 0.95, 0.01, key=k("tab1_min_conf"))
 
     if src == "Combined":
         options, help_txt = paired_dates, "Only dates that have BOTH BN & KN detections."
