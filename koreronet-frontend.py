@@ -362,19 +362,6 @@ def _folder_children_cached(folder_id: str) -> List[Dict[str, Any]]:
         st.session_state[key] = list_children(folder_id, max_items=2000)
     return st.session_state[key]
 
-def download_to(path: Path, file_id: str, force: bool = False) -> Path:
-    drive = get_drive_client()
-    from googleapiclient.http import MediaIoBaseDownload
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if (not force) and path.exists():
-        return path
-    req = drive.files().get_media(fileId=file_id)
-    with open(path, "wb") as fh:
-        downloader = MediaIoBaseDownload(fh, req)
-        done = False
-        while not done:
-            _, done = downloader.next_chunk()
-    return path
 
 def ensure_csv_cached(meta: Dict[str, Any], subdir: str, cache_epoch: str = "", force: bool = False) -> Path:
     local_path = (CSV_CACHE / subdir / meta["name"])
@@ -1111,65 +1098,54 @@ with tab_nodes:
         [{"lat": n["lat"], "lon": n["lon"], "name": n["name"], "key": n["key"], "desc": n["desc"]} for n in NODES]
     )
 
-    # Scattermapbox (no Mapbox token needed with "open-street-map")
     # --- BIG DOT + HALO ---
-fig_nodes = go.Figure()
+    fig_nodes = go.Figure()
 
-# 1) Soft halo so the pin stands out on any background
-fig_nodes.add_trace(go.Scattermapbox(
-    lat=_df_nodes["lat"],
-    lon=_df_nodes["lon"],
-    mode="markers",
-    marker=dict(
-        size=44,                 # <- big halo
-        color="rgba(255,0,0,0.18)",  # translucent halo
-    ),
-    hoverinfo="skip",
-    showlegend=False,
-))
+    # 1) Soft halo
+    fig_nodes.add_trace(go.Scattermapbox(
+        lat=_df_nodes["lat"],
+        lon=_df_nodes["lon"],
+        mode="markers",
+        marker=dict(size=44, color="rgba(255,0,0,0.18)"),
+        hoverinfo="skip",
+        showlegend=False,
+    ))
 
-# 2) Main clickable dot (thick white outline)
-fig_nodes.add_trace(go.Scattermapbox(
-    lat=_df_nodes["lat"],
-    lon=_df_nodes["lon"],
-    mode="markers+text",
-    marker=dict(
-        size=28,                 # <- BIG dot
-        color="crimson",
-        line=dict(width=3, color="white"),  # high-contrast outline
-    ),
-    text=_df_nodes["name"],
-    textposition="top center",
-    textfont=dict(size=14),
-    customdata=_df_nodes["key"],           # used for click → node key
-    hovertext=_df_nodes["desc"],
-    hoverinfo="text",
-    showlegend=False,
-))
+    # 2) Main clickable dot (white outline) + label
+    fig_nodes.add_trace(go.Scattermapbox(
+        lat=_df_nodes["lat"],
+        lon=_df_nodes["lon"],
+        mode="markers+text",
+        marker=dict(size=28, color="crimson", line=dict(width=3, color="white")),
+        text=_df_nodes["name"],
+        textposition="top center",
+        textfont=dict(size=14),
+        customdata=_df_nodes["key"],     # used to retrieve node key on click
+        hovertext=_df_nodes["desc"],
+        hoverinfo="text",
+        showlegend=False,
+    ))
 
-# Center/zoom
-center_lat = float(_df_nodes["lat"].mean()) if not _df_nodes.empty else -36.8528
-center_lon = float(_df_nodes["lon"].mean()) if not _df_nodes.empty else 174.8150
-fig_nodes.update_layout(
-    mapbox_style="open-street-map",
-    mapbox=dict(center=dict(lat=center_lat, lon=center_lon), zoom=12),  # a touch closer
-    margin=dict(l=0, r=0, t=0, b=0),
-    height=520,
-)
+    # Center/zoom
+    center_lat = float(_df_nodes["lat"].mean()) if not _df_nodes.empty else -36.8528
+    center_lon = float(_df_nodes["lon"].mean()) if not _df_nodes.empty else 174.8150
+    fig_nodes.update_layout(
+        mapbox_style="open-street-map",
+        mapbox=dict(center=dict(lat=center_lat, lon=center_lon), zoom=12),
+        margin=dict(l=0, r=0, t=0, b=0),
+        height=520,
+        showlegend=False,
+    )
 
-
-
-    # If streamlit-plotly-events is available, capture click; else just show the map.
+    # If streamlit-plotly-events is available, it will both render and capture clicks
     selected_key = None
     if plotly_events is not None:
         click = plotly_events(fig_nodes, click_event=True, hover_event=False, select_event=False, key=k("node_map"))
         if click:
-            # click[0] contains point info; prefer customdata if present
             cd = click[0].get("customdata")
             if cd:
                 selected_key = str(cd)
             else:
-                # fallback: match lat/lon to find node
                 try:
                     i = int(click[0].get("pointIndex", 0))
                     selected_key = _df_nodes.iloc[i]["key"]
@@ -1179,23 +1155,19 @@ fig_nodes.update_layout(
         st.plotly_chart(fig_nodes, use_container_width=True)
         st.info("Install `streamlit-plotly-events` to enable click selection: `pip install streamlit-plotly-events`")
 
-    # Show current/selected node + apply button
+    # Status + apply
     current_node = st.session_state.get("node_select_top", NODE_KEYS[0])
     cols = st.columns([2, 3, 2])
     with cols[0]:
         st.write(f"**Current node:** {current_node}")
     with cols[1]:
-        if selected_key:
-            st.success(f"Selected on map: {selected_key}")
-        else:
-            st.caption("Click a pin to select a node.")
+        st.caption("Click the big dot to select a node.") if not selected_key else st.success(f"Selected on map: {selected_key}")
     with cols[2]:
-        disabled = not bool(selected_key)
-        if st.button("Set as active node", disabled=disabled, key=k("apply_node_from_map")) and selected_key:
-            # Update the global Node Select widget and rerun
+        if st.button("Set as active node", disabled=not bool(selected_key), key=k("apply_node_from_map")) and selected_key:
             st.session_state["node_select_top"] = selected_key
             st.success(f"Active node set to: {selected_key}")
             st.rerun()
+
 
 
 # =========================
