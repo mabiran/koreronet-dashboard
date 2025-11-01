@@ -142,12 +142,7 @@ NODES = [
     },
     # Add more nodes here as needed...
 ]
-NODE_KEYS = [n["key"] 
-
-# --- Active node state (safe default & legacy read-only compatibility) ---
-if 'active_node' not in st.session_state:
-    st.session_state['active_node'] = st.session_state.get('node_select_top', NODE_KEYS[0])
-for n in NODES]
+NODE_KEYS = [n["key"] for n in NODES]
 
 # ============================================================================
 # Splash
@@ -1031,139 +1026,44 @@ def _latest_root_summary(root_id_or_path: str, live: bool) -> Tuple[Optional[str
 
     return mode_label, chosen, merged
 
-
 def _render_welcome_overlay():
-    # Only once per session (until refresh)
+    # Only show once per session unless user refreshes cache
     if st.session_state.get("__welcome_done__", False):
         return
-
-    # Try to compute a quick “today” sentence from latest root CSVs (safe to fail)
-    with st.spinner("Preparing welcome…"):
-        try:
-            mode, chosen_date, df = _latest_root_summary(GDRIVE_FOLDER_ID, False)
-        except Exception:
-            mode, chosen_date, df = None, None, None
-
-    holder = st.empty()
-    with holder.container():
+    with st.spinner("Summarising latest detections…"):
+        mode, chosen_date, df = _latest_root_summary(GDRIVE_FOLDER_ID, False)
+    # Soft gate: show overlay, skip rendering tabs until user continues
+    overlay = st.empty()
+    with overlay.container():
         st.markdown('<div class="overlay-card">', unsafe_allow_html=True)
-
-        # HERO
-        st.markdown('<div class="hero">', unsafe_allow_html=True)
-        st.markdown("<h1>Harness AI for real-time remote environmental monitoring</h1>", unsafe_allow_html=True)
-        st.markdown('<p class="lead">Receive continuous, real-time data that manual surveys can’t match. '
-                    'Never miss a critical event — get instant insights for timely decision-making.</p>',
-                    unsafe_allow_html=True)
-
-        # Today’s brief (if we have it)
-        if isinstance(df, type(pd.DataFrame())) and not df.empty and chosen_date is not None:
-            try:
-                counts = df["Label"].astype(str).value_counts()
-                top = [(lbl, int(counts[lbl])) for lbl in counts.index[:3]]
-                total = int(counts.sum())
-                uniq  = int(counts.shape[0])
-                def _human_day(d):
-                    t = datetime.now().date()
-                    if d == t: return "Today"
-                    if d == (t - timedelta(days=1)): return "Yesterday"
-                    return d.strftime("%A, %d %b %Y")
-                nice = _human_day(chosen_date)
-                def _join(items):
-                    items = [(l, c) for l, c in items if c > 0]
-                    if not items: return ""
-                    parts = [f"**{c:,} {l}**" for l, c in items[:3]]
-                    if len(parts) == 1: return parts[0]
-                    if len(parts) == 2: return " and ".join(parts)
-                    return f"{', '.join(parts[:-1])}, and {parts[-1]}"
-                st.markdown(f"<p class='lead'>{nice} we detected {_join(top)} "
-                            f"({total:,} detections across {uniq:,} species).</p>", unsafe_allow_html=True)
-            except Exception:
-                pass
-
-        st.markdown('<div class="cta">', unsafe_allow_html=True)
-        col1, col2 = st.columns([1,1])
-        with col1:
-            if st.button("Enter dashboard →", type="primary", key=k("hero_continue")):
+        st.markdown('<div class="overlay-title">KōreroNET — Latest Field Summary</div>', unsafe_allow_html=True)
+        if df is None or df.empty or chosen_date is None:
+            st.markdown('<div class="overlay-sub">No parsable detections found in the most recent root CSVs.</div>', unsafe_allow_html=True)
+        else:
+            # Count per Label (no confidence filter here; this is a raw snapshot)
+            counts = df["Label"].astype(str).value_counts()
+            top = [(lbl, int(counts[lbl])) for lbl in counts.index[:3]]
+            nice_day = _human_day(chosen_date)
+            sentence = f"{nice_day} we detected {_join_top(top)}."
+            st.markdown(f'<div class="overlay-sub">{sentence}</div>', unsafe_allow_html=True)
+            # Tiny “pills” for context
+            total = int(counts.sum())
+            uniq  = int(counts.shape[0])
+            st.markdown(f"""
+                <div class="overlay-pill">Mode: {mode or '—'}</div>
+                <div class="overlay-pill">Date: {chosen_date.isoformat() if chosen_date else '—'}</div>
+                <div class="overlay-pill">Detections: {total:,}</div>
+                <div class="overlay-pill">Species: {uniq:,}</div>
+            """, unsafe_allow_html=True)
+        #st.divider()
+        c1, c2 = st.columns([1,5])
+        with c1:
+            if st.button("Continue →", type="primary", key=k("welcome_continue")):
                 st.session_state["__welcome_done__"] = True
                 st.rerun()
-        with col2:
-            # Simple “contact” action that works offline/online
-            try:
-                st.link_button("Get in touch", "mailto:team@example.org?subject=KōreroNET")
-            except Exception:
-                st.write("Contact: team@example.org")
+
         st.markdown('</div>', unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)  # /hero
-
-        # USE-CASE CARDS
-        st.markdown('<div class="section">', unsafe_allow_html=True)
-        st.markdown("### Are you achieving your environmental monitoring goals?")
-        st.markdown("Manual surveys miss events. KōreroNET streams observations continuously from the field — so you can act in time.")
-        st.markdown('<div class="cards">', unsafe_allow_html=True)
-
-        # Bird call monitoring
-        st.markdown("""
-<div class="card">
-  <div class="icon">🎙️</div>
-  <h4>Bird call monitoring</h4>
-  <p>Edge AI + sensitive microphones classify calls and stream detections to the cloud in real-time, turning audio into actionable insights.</p>
-</div>
-""", unsafe_allow_html=True)
-
-        # Kiwi transmitter monitoring
-        st.markdown("""
-<div class="card">
-  <div class="icon">📡</div>
-  <h4>Kiwi transmitter monitoring</h4>
-  <p>Low-power on-device decoding of radio telemetry yields frequent updates and location estimates — enabling closer protection.</p>
-</div>
-""", unsafe_allow_html=True)
-
-        # Pest trap monitoring
-        st.markdown("""
-<div class="card">
-  <div class="icon">🪤</div>
-  <h4>Pest trap monitoring</h4>
-  <p>AI-powered motion sensing reduces false positives. Solar sensors report trap status, GPS, temperature and humidity in real time.</p>
-</div>
-""", unsafe_allow_html=True)
-
-        st.markdown('</div>', unsafe_allow_html=True)  # /cards
-        st.markdown('</div>', unsafe_allow_html=True)  # /section
-
-        # FEATURE GRID
-        st.markdown('<div class="section">', unsafe_allow_html=True)
-        st.markdown("### Platform features")
-        st.markdown('<div class="features">', unsafe_allow_html=True)
-
-        feats = [
-            ("🤖", "AI-powered detection", "Advanced on-device models for complex acoustic & sensor signals."),
-            ("⚡",  "Real-time data", "Instant delivery for timely decisions."),
-            ("🔆",  "Solar-powered sensors", "Self-sustaining nodes for remote deployments."),
-            ("📶",  "Robust mesh radio", "Connectivity that works in the backcountry."),
-            ("📊",  "Feature-rich cloud", "Dashboards, alerts, APIs, and exports."),
-            ("💸",  "Cost-effective", "Direct sourcing and in-house design."),
-            ("🦊",  "Invasive predator detection", "Detect stoats, possums and other pests."),
-            ("🛰️", "Over-the-air programmable", "Update models & firmware remotely."),
-            ("👐",  "Open-source", "Core software and formats are open when possible."),
-        ]
-        for icon, title, sub in feats:
-            st.markdown(f"""
-<div class="feature">
-  <div class="badge">{icon}</div>
-  <div>
-    <div class="label">{title}</div>
-    <div class="sub">{sub}</div>
-  </div>
-</div>
-""", unsafe_allow_html=True)
-
-        st.markdown('</div>', unsafe_allow_html=True)  # /features
-        st.markdown('</div>', unsafe_allow_html=True)  # /section
-
-        st.markdown('</div>', unsafe_allow_html=True)  # /overlay-card
-
-    # Block the rest of the app until user continues
+    # Block tabs on first paint
     st.stop()
 
 # Show the overlay once per session (after splash, before tabs)
@@ -1193,145 +1093,102 @@ tab_nodes, tab1, tab_verify, tab3, tab4 = st.tabs(["🗺️ Nodes", "📊 Detect
 # ==================================
 # TAB — Nodes (stable map fallback)
 # ==================================
-
 with tab_nodes:
     st.subheader("Choose a node")
 
-    # Build DataFrame for map layers
     _df_nodes = pd.DataFrame(
         [{"lat": n["lat"], "lon": n["lon"], "name": n["name"], "key": n["key"], "desc": n["desc"]} for n in NODES]
     )
 
-    # --- Selection UI (stable, no click hooks) ---
-    current_node = st.session_state.get("active_node", NODE_KEYS[0])
+    # ---- stable selection state (do NOT write to widget keys) ----
+    default_active = (
+        st.session_state.get("active_node")
+        or st.session_state.get("node_select_top")  # legacy read-only
+        or NODE_KEYS[0]
+    )
+    if "active_node" not in st.session_state:
+        st.session_state["active_node"] = default_active
+
     node_choice = st.selectbox(
         "Active node",
         NODE_KEYS,
-        index=NODE_KEYS.index(current_node) if current_node in NODE_KEYS else 0,
+        index=NODE_KEYS.index(st.session_state["active_node"]) if st.session_state["active_node"] in NODE_KEYS else 0,
         key=k("node_select_choice"),
     )
-    set_col1, set_col2 = st.columns([1,4])
+
+    set_col1, set_col2 = st.columns([1, 4])
     with set_col1:
         if st.button("Set as active node", key=k("apply_node_box")):
-            st.session_state["active_node"] = node_choice
+            st.session_state["active_node"] = node_choice  # <- only update our own key
             st.success(f"Active node set to: {node_choice}")
+            st.rerun()
 
-    # Center on chosen node
+    # Center on the active node
     try:
-        _center = _df_nodes[_df_nodes["key"] == node_choice][["lat","lon"]].iloc[0].to_dict()
+        _center = _df_nodes[_df_nodes["key"] == st.session_state["active_node"]][["lat", "lon"]].iloc[0].to_dict()
         center_lat, center_lon = float(_center["lat"]), float(_center["lon"])
     except Exception:
         center_lat, center_lon = -36.8528, 174.8150
 
-    # --- Render map (tiered fallback) ---
+    # ----- map fallbacks (folium → pydeck → plain plotly) -----
     rendered = False
+    try:
+        import folium
+        from streamlit_folium import st_folium
+        m = folium.Map(location=[center_lat, center_lon], zoom_start=12, control_scale=True, tiles="OpenStreetMap")
+        for _, r in _df_nodes.iterrows():
+            folium.Circle(location=[float(r["lat"]), float(r["lon"])], radius=150,
+                          color=None, fill=True, fill_opacity=0.18, fill_color="#ff0000").add_to(m)
+            folium.CircleMarker(location=[float(r["lat"]), float(r["lon"])], radius=16,
+                                color=None, fill=True, fill_color="#ffffff", fill_opacity=1.0).add_to(m)
+            folium.CircleMarker(location=[float(r["lat"]), float(r["lon"])], radius=14,
+                                color=None, fill=True, fill_color="#dc143c", fill_opacity=0.95,
+                                tooltip=f"{r['name']}\n{r['desc']}").add_to(m)
+        st_folium(m, width=None, height=520)
+        rendered = True
+    except Exception:
+        pass
 
-    # 1) Folium (best stability)
-    if not rendered:
-        try:
-            import folium
-            from streamlit_folium import st_folium
-
-            m = folium.Map(location=[center_lat, center_lon], zoom_start=12, control_scale=True, tiles="OpenStreetMap")
-
-            # soft halo (big translucent)
-            for _, r in _df_nodes.iterrows():
-                folium.Circle(
-                    location=[float(r["lat"]), float(r["lon"])],
-                    radius=150, color=None, fill=True, fill_opacity=0.18, fill_color="#ff0000"
-                ).add_to(m)
-
-            # main marker with “outline” look using CircleMarker twice
-            for _, r in _df_nodes.iterrows():
-                # white underlay
-                folium.CircleMarker(
-                    location=[float(r["lat"]), float(r["lon"])],
-                    radius=16, color=None, fill=True, fill_color="#ffffff", fill_opacity=1.0,
-                ).add_to(m)
-                # crimson dot
-                folium.CircleMarker(
-                    location=[float(r["lat"]), float(r["lon"])],
-                    radius=14, color=None, fill=True, fill_color="#dc143c", fill_opacity=0.95,
-                    tooltip=f"{r['name']} — {r['desc']}"
-                ).add_to(m)
-
-            st_folium(m, width=None, height=520)
-            rendered = True
-        except Exception:
-            rendered = False
-
-    # 2) pydeck (good stability)
     if not rendered:
         try:
             import pydeck as pdk
-            layer_halo = pdk.Layer(
-                "ScatterplotLayer",
-                data=_df_nodes,
-                get_position='[lon, lat]',
-                get_radius=180,
-                get_fill_color='[255,0,0,46]',  # translucent halo
-                pickable=False,
-            )
-            layer_white = pdk.Layer(
-                "ScatterplotLayer",
-                data=_df_nodes,
-                get_position='[lon, lat]',
-                get_radius=24,
-                get_fill_color='[255,255,255,255]',
-                pickable=False,
-            )
-            layer_main = pdk.Layer(
-                "ScatterplotLayer",
-                data=_df_nodes,
-                get_position='[lon, lat]',
-                get_radius=20,
-                get_fill_color='[220,20,60,242]',
-                pickable=True,
-                getTooltip='"name"',
-            )
-            view_state = pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=12, pitch=0, bearing=0)
-            st.pydeck_chart(pdk.Deck(layers=[layer_halo, layer_white, layer_main], initial_view_state=view_state, map_style=None))
+            halo = pdk.Layer("ScatterplotLayer", data=_df_nodes, get_position='[lon, lat]',
+                             get_radius=180, get_fill_color='[255,0,0,46]', pickable=False)
+            white = pdk.Layer("ScatterplotLayer", data=_df_nodes, get_position='[lon, lat]',
+                              get_radius=24, get_fill_color='[255,255,255,255]', pickable=False)
+            main = pdk.Layer("ScatterplotLayer", data=_df_nodes, get_position='[lon, lat]',
+                             get_radius=20, get_fill_color='[220,20,60,242]', pickable=True)
+            view = pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=12)
+            st.pydeck_chart(pdk.Deck(layers=[halo, white, main], initial_view_state=view,
+                                     map_style=None, tooltip={"text": "{name}\n{desc}"}))
             rendered = True
         except Exception:
-            rendered = False
+            pass
 
-    # 3) Plain Plotly scatter (always works; no basemap)
     if not rendered:
         import plotly.graph_objects as go
         fig = go.Figure()
-        # soft halo
-        fig.add_trace(go.Scatter(
-            x=_df_nodes["lon"].tolist(), y=_df_nodes["lat"].tolist(),
-            mode="markers",
-            marker=dict(size=30, color="rgba(255,0,0,0.18)"),
-            hoverinfo="skip", showlegend=False,
-        ))
-        # white underlay
-        fig.add_trace(go.Scatter(
-            x=_df_nodes["lon"].tolist(), y=_df_nodes["lat"].tolist(),
-            mode="markers",
-            marker=dict(size=22, color="white"),
-            hoverinfo="skip", showlegend=False,
-        ))
-        # main dot + label
-        fig.add_trace(go.Scatter(
-            x=_df_nodes["lon"].tolist(), y=_df_nodes["lat"].tolist(),
-            mode="markers+text",
-            marker=dict(size=18, color="crimson"),
-            text=_df_nodes["name"].tolist(),
-            textposition="top center",
-            hovertext=_df_nodes["desc"].tolist(),
-            hoverinfo="text",
-            showlegend=False,
-        ))
-        fig.update_layout(
-            title=None, xaxis_title="Longitude", yaxis_title="Latitude",
-            height=520, margin=dict(l=0, r=0, t=10, b=0)
-        )
+        fig.add_trace(go.Scatter(x=_df_nodes["lon"], y=_df_nodes["lat"], mode="markers",
+                                 marker=dict(size=30, color="rgba(255,0,0,0.18)"),
+                                 hoverinfo="skip", showlegend=False))
+        fig.add_trace(go.Scatter(x=_df_nodes["lon"], y=_df_nodes["lat"], mode="markers",
+                                 marker=dict(size=22, color="white"),
+                                 hoverinfo="skip", showlegend=False))
+        fig.add_trace(go.Scatter(x=_df_nodes["lon"], y=_df_nodes["lat"], mode="markers+text",
+                                 marker=dict(size=18, color="crimson"),
+                                 text=_df_nodes["name"], textposition="top center",
+                                 hovertext=_df_nodes["desc"], hoverinfo="text",
+                                 showlegend=False))
+        fig.update_layout(height=520, margin=dict(l=0, r=0, t=10, b=0),
+                          xaxis_title="Longitude", yaxis_title="Latitude")
         st.plotly_chart(fig, use_container_width=True)
 
-
-with tab1:
+# =========================
+# TAB 1 — Detections (root)
+# =========================
+# =========================
+# TAB 1 — Detections (root)
+# =========================
 with tab1:
     # 1) Load/prepare root CSVs (Drive or Local) and build date indexes
     status = st.empty()
