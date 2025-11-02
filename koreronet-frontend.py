@@ -1,30 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# KōreroNET Dashboard — HARDENED (Drive-safe, cache-safe)
-# ---------------------------------------------------------------------------------
-# What’s new vs your last version:
-#  • Circuit breaker for Google Drive: after repeated errors, session falls back to offline
-#  • All Drive calls wrapped with jittered retries + googleapiclient num_retries
-#  • Atomic cached downloads + file lock to prevent competing writers (race-proof)
-#  • Defensive st.cache_data usage (epoch keys only; no cross-key invalidation)
-#  • Safer CSV parsing (on_bad_lines='skip', low_memory=False) and chunked loading
-#  • Audio fetch capped to 30 MB with defensive base64 embed and memory errors handled
-#  • Refresh only clears our own keys; avoids clearing in-flight caches
-#  • UI toggle to force Offline (local clone) instantly if Drive is flaky
-#  • Never hard-crash: every Drive interaction is non-fatal and reports a gentle warning
+# KōreroNET Dashboard (with splash + Drive)
+# ------------------------------------------------------------
+# - Splash screen (“KōreroNET” + “AUT”) for ~2s, then main UI
+# - NEW: Welcome overlay summarising latest detections (top-3) before tabs render
+# - Tab 1: Root CSV heatmaps (Drive or local) with calendar + min confidence
+# - Tab 2: Verify using snapshot date (Backup/YYYYMMDD_HHMMSS);
+#          on-demand audio chunk fetch from Drive (no full directory downloads).
+# - Tab 3: Power graph from "Power logs" (Drive), stitches latest N logs;
+#          dual y-axes: SoC_i (%) and Wh.
 #
-# Functionality preserved:
-#  • Splash + Welcome overlay (top-3 species summary)
-#  • Tab “Nodes” with mapping fallbacks (folium → pydeck → plotly)
-#  • Tab 1 “Detections” (root CSV heatmaps, calendar, min confidence, Combined mode)
-#  • Tab 2 “Verify recordings” (snapshot masters, playlist prev/play/next, on-demand fetch)
-#  • Tab 3 “Power” (dual-axis SoC_i/Wh)
-#  • Tab 4 “GUI autostart log tail” with download
-#
-# Notes:
-#  • Set OFFLINE_DEPLOY=True to force local mode. Or use the UI toggle at runtime.
-#  • For Drive mode, set secrets as before (GDRIVE_FOLDER_ID + [service_account]).
-# ---------------------------------------------------------------------------------
+# Streamlit secrets required (only if OFFLINE_DEPLOY=False):
+#   GDRIVE_FOLDER_ID = "your_root_folder_id"
+#   [service_account]
+#   type = "service_account"
+#   project_id = "..."
+#   private_key_id = "..."
+#   private_key = (paste PEM with real newlines, no \n escapes)
+#   client_email = "...@...iam.gserviceaccount.com"
+#   client_id = "..."
+#   auth_uri = "https://accounts.google.com/o/oauth2/auth"
+#   token_uri = "https://oauth2.googleapis.com/token"
+#   auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
+#   client_x509_cert_url = "https://www.googleapis.com/robot/v1/metadata/x509/...."
+#   universe_domain = "googleapis.com"
+# ------------------------------------------------------------
 
 import os, io, re, glob, json, time, uuid
 from pathlib import Path
@@ -38,18 +38,11 @@ import plotly.graph_objects as go
 import streamlit as st
 import functools
 import random
-import threading
-import tempfile
 
-# Optional (best-effort) import
 try:
-    from streamlit_plotly_events import plotly_events  # noqa
+    from streamlit_plotly_events import plotly_events
 except Exception:
-    plotly_events = None
-
-# =================================================================================
-# Hardened utilities: retry, circuit breaker, file-lock + atomic writes
-# =================================================================================
+    plotly_events = None  # graceful fallback
 
 def _retry(exceptions=(Exception,), tries=3, base_delay=0.35, max_delay=1.2, jitter=0.25):
     """Simple retry decorator with jittered backoff."""
@@ -58,62 +51,24 @@ def _retry(exceptions=(Exception,), tries=3, base_delay=0.35, max_delay=1.2, jit
         def wrap(*args, **kwargs):
             _tries = tries
             _delay = base_delay
-            last_err = None
             while _tries > 0:
                 try:
                     return fn(*args, **kwargs)
                 except exceptions as e:
-                    last_err = e
                     _tries -= 1
                     if _tries <= 0:
                         raise
                     time.sleep(_delay + random.random() * jitter)
                     _delay = min(max_delay, _delay * 1.6)
-            raise last_err  # should not happen
         return wrap
     return deco
-
-# --- circuit breaker state (per session) ---
-if "DRIVE_FAILS" not in st.session_state:
-    st.session_state["DRIVE_FAILS"] = 0
-if "DRIVE_OPEN" not in st.session_state:
-    st.session_state["DRIVE_OPEN"] = True  # when False => force offline for this session
-
-def _cb_record(success: bool):
-    if success:
-        st.session_state["DRIVE_FAILS"] = max(0, st.session_state["DRIVE_FAILS"] - 1)
-    else:
-        st.session_state["DRIVE_FAILS"] += 1
-        if st.session_state["DRIVE_FAILS"] >= 3:
-            st.session_state["DRIVE_OPEN"] = False  # trip
-            st.warning("Drive circuit tripped — falling back to Offline for this session.")
-
-# --- simple file lock (portable) ---
-def _acquire_lock(lock_path: Path, timeout: float = 10.0) -> Optional[Path]:
-    start = time.time()
-    while True:
-        try:
-            # O_EXCL ensures we "win" if the file doesn't exist
-            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_RDWR)
-            os.close(fd)
-            return lock_path
-        except FileExistsError:
-            if time.time() - start > timeout:
-                return None
-            time.sleep(0.1)
-
-def _release_lock(lock_path: Path):
-    try:
-        lock_path.unlink(missing_ok=True)
-    except Exception:
-        pass
-
-# =================================================================================
-# Page setup + styles
-# =================================================================================
+# ─────────────────────────────────────────────────────────────
+# Page style
+# ─────────────────────────────────────────────────────────────
 st.set_page_config(page_title="KōreroNET Dashboard", layout="wide")
 st.markdown("""
 <style>
+
 [data-testid="stDecoration"] { display: none !important; }
 .block-container {padding-top:1rem; padding-bottom:1rem;}
 .center-wrap {display:flex; align-items:center; justify-content:center; min-height:65vh; text-align:center;}
@@ -123,48 +78,108 @@ st.markdown("""
 .fade-exit  {animation: fadeOut 400ms ease forwards;}
 @keyframes fadeIn { from {opacity:0} to {opacity:1} }
 @keyframes fadeOut { from {opacity:1} to {opacity:0} }
+
+/* FIX: correct property so keyframes don’t glitch */
 .pulse {position:relative; width:14px; height:14px; margin:18px auto 0; border-radius:50%; background:#16a34a; box-shadow:0 0 0 rgba(22,163,74,.7); animation: pulse 1.6s infinite;}
-@keyframes pulse { 0%{ box-shadow:0 0 0 0 rgba(22,163,74,.7);} 70%{ box-shadow:0 0 0 22px rgba(22,163,74,0);} 100%{ box-shadow:0 0 0 0 rgba(22,163,74,0);} }
+@keyframes pulse { 
+  0%   { box-shadow:0 0 0 0 rgba(22,163,74,.7); } 
+  70%  { box-shadow:0 0 0 22px rgba(22,163,74,0); } 
+  100% { box-shadow:0 0 0 0 rgba(22,163,74,0); } 
+}
+
 .stTabs [role="tablist"] {gap:.5rem;}
 .stTabs [role="tab"] {padding:.6rem 1rem; border-radius:999px; border:1px solid #3a3a3a;}
 .small {font-size:0.9rem; opacity:0.85;}
-.overlay-card { max-width: 860px; margin: 6vh auto; padding: 24px 28px; border: none; border-radius: 16px; background: rgba(28,28,28,.96); box-shadow: 0 10px 30px rgba(0,0,0,.35); }
+
+/* Overlay card — remove border/gradient that looked like a ribbon */
+.overlay-card {
+  max-width: 860px; margin: 6vh auto; padding: 24px 28px; border: none;
+  border-radius: 16px;
+  background: rgba(28,28,28,.96); /* solid, no gradient banding */
+  box-shadow: 0 10px 30px rgba(0,0,0,.35);
+}
 .overlay-title {font-size: clamp(28px,4vw,42px); font-weight: 800; letter-spacing:.01em; margin-bottom:.25rem;}
 .overlay-sub {font-size: clamp(16px,2.2vw,18px); opacity:.9; margin-bottom: .75rem;}
-.overlay-pill { display:inline-block; padding: .35rem .75rem; border: 1px solid #444; border-radius: 999px; margin:.25rem .25rem 0 0; font-size:.95rem; background: rgba(255,255,255,.03);}
+.overlay-pill {
+  display:inline-block; padding: .35rem .75rem; border: 1px solid #444; border-radius: 999px;
+  margin:.25rem .25rem 0 0; font-size:.95rem; background: rgba(255,255,255,.03);
+}
+
+/* Make any <hr> or dividers inside overlays transparent, just in case */
 .overlay-card hr { border: 0; height: 0; }
+/* Hide any empty elements inside overlay so they don't render as a fat pill */
 .overlay-card :where(p,div,span):empty { display: none !important; }
-.features-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1rem; margin-top: 1rem; }
-.feature-card { display: flex; align-items: flex-start; gap: 0.65rem; background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 12px; padding: 0.75rem 0.9rem; }
-.feature-icon { font-size: 1.4rem; line-height: 1.4rem; }
-.feature-text { font-size: 1rem; line-height: 1.3rem; flex: 1; }
+
+/*
+ * Features grid styles for the welcome overlay. This layout is inspired by
+ * the rectangular technology highlight cards on the Hark website. Each
+ * feature consists of a small icon and a brief description. The grid
+ * automatically wraps based on screen width and keeps spacing consistent.
+ */
+.features-grid {
+  display: grid;
+  /* Adjust the minimum column width to ensure cards wrap nicely on narrow screens */
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 1rem;
+  margin-top: 1rem;
+}
+.feature-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.65rem;
+  /* A subtle translucent background to delineate each card */
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 12px;
+  padding: 0.75rem 0.9rem;
+}
+.feature-icon {
+  font-size: 1.4rem;
+  line-height: 1.4rem;
+}
+.feature-text {
+  font-size: 1rem;
+  line-height: 1.3rem;
+  flex: 1;
+}
+
+/* Also hide Streamlit's status/decoration bars just in case */
 [data-testid="stHeader"] { background: transparent !important; }
 [data-testid="stDecoration"] { display: none !important; }
 [data-testid="stStatusWidget"] { display: none !important; }
+
 </style>
 """, unsafe_allow_html=True)
 
-# =================================================================================
+
+# ============================================================================
 # Constants & Regex
-# =================================================================================
+# ============================================================================
 CHUNK_RE = re.compile(
-    r"^(?P<root>\\d{8}_\\d{6})__(?P<tag>bn|kn)_(?P<s>\\d+\\.\\d{2})_(?P<e>\\d+\\.\\d{2})__(?P<label>.+?)__p(?P<conf>\\d+\\.\\d{2})\\.wav$",
+    r"^(?P<root>\d{8}_\d{6})__(?P<tag>bn|kn)_(?P<s>\d+\.\d{2})_(?P<e>\d+\.\d{2})__(?P<label>.+?)__p(?P<conf>\d+\.\d{2})\.wav$",
     re.IGNORECASE,
 )
-NEW_ROOT_BN = re.compile(r"^\\d{8}_\\d{6}_birdnet_master\\.csv$", re.IGNORECASE)
-NEW_ROOT_KN = re.compile(r"^\\d{8}_\\d{6}_koreronet_master\\.csv$", re.IGNORECASE)
-SNAP_RE     = re.compile(r"^(\\d{8})_(\\d{6})$", re.IGNORECASE)
-LOG_AUTOSTART_RE = re.compile(r"^(\\d{8})_(\\d{6})__gui_autostart\\.log$", re.IGNORECASE)
-CUTOFF_NEW  = date(2025, 10, 31)
-
+NEW_ROOT_BN = re.compile(r"^\d{8}_\d{6}_birdnet_master\.csv$", re.IGNORECASE)
+NEW_ROOT_KN = re.compile(r"^\d{8}_\d{6}_koreronet_master\.csv$", re.IGNORECASE)
+SNAP_RE     = re.compile(r"^(\d{8})_(\d{6})$", re.IGNORECASE)
+LOG_AUTOSTART_RE = re.compile(r"^(\d{8})_(\d{6})__gui_autostart\.log$", re.IGNORECASE)
+CUTOFF_NEW  = date(2025, 10, 31)  # new format becomes active on/after this date
+# Preset field nodes (extend as you add sites)
 NODES = [
-    {"key":"Auckland-Orākei","name":"Auckland — Orākei","lat":-36.8528,"lon":174.8150,"desc":"Primary demo node in Orākei, Auckland"}
+    {
+        "key": "Auckland-Orākei",
+        "name": "Auckland — Orākei",
+        "lat": -36.8528,     # approx Orākei
+        "lon": 174.8150,
+        "desc": "Primary demo node in Orākei, Auckland",
+    },
+    # Add more nodes here as needed...
 ]
 NODE_KEYS = [n["key"] for n in NODES]
 
-# =================================================================================
+# ============================================================================
 # Splash
-# =================================================================================
+# ============================================================================
 if "splash_done" not in st.session_state:
     placeholder = st.empty()
     with placeholder.container():
@@ -178,55 +193,68 @@ if "splash_done" not in st.session_state:
                 <div class="small" style="margin-top:10px;">initialising…</div>
               </div>
             </div>
-            """, unsafe_allow_html=True
+            """,
+            unsafe_allow_html=True,
         )
     time.sleep(1.2)
     st.session_state["splash_done"] = True
     st.rerun()
 
-# =================================================================================
-# Session helpers
-# =================================================================================
+# ============================================================================
+# Utility: unique keys + live toggle
+# ============================================================================
 if "_sess_salt" not in st.session_state:
     st.session_state["_sess_salt"] = str(uuid.uuid4())[:8]
+
 def k(name: str) -> str:
+    """Unique widget key helper."""
     return f"{name}::{st.session_state['_sess_salt']}"
 
-# =================================================================================
+
+
+# ============================================================================
 # Caches & local fallback
-# =================================================================================
-CACHE_ROOT   = Path(tempfile.gettempdir()) / "koreronet_cache"
+# ============================================================================
+CACHE_ROOT   = Path("/tmp/koreronet_cache")
 CSV_CACHE    = CACHE_ROOT / "csv"
 CHUNK_CACHE  = CACHE_ROOT / "chunks"
 POWER_CACHE  = CACHE_ROOT / "power"
 for _p in (CSV_CACHE, CHUNK_CACHE, POWER_CACHE):
     _p.mkdir(parents=True, exist_ok=True)
 
-DEFAULT_ROOT = r"G:\\My Drive\\From the node"
+DEFAULT_ROOT = r"G:\My Drive\From the node"
 ROOT_LOCAL   = os.getenv("KORERONET_DATA_ROOT", DEFAULT_ROOT)
-OFFLINE_DEPLOY: bool = bool(os.getenv("KORERONET_OFFLINE", "0") == "1")
+
+# ---- Offline/Online switch --------------------------------------------------
+OFFLINE_DEPLOY: bool = False   # ← flip to False when you want online mode
+
+# Your local Google Drive clone root:
+ROOT_LOCAL = os.getenv("KORERONET_DATA_ROOT", r"G:\My Drive\From the node")
 
 def _secret_or_env(name: str, default=None):
     v = os.getenv(name)
     if v is not None:
         return v
     try:
+        import streamlit as st
         return st.secrets[name]
     except Exception:
         return default
 
-# =================================================================================
-# Drive client (guarded) + UI Offline toggle
-# =================================================================================
-row_top = st.columns([3,2,2])
+# If offline, map "Drive root id" to local clone path; otherwise read from env/secrets.
+GDRIVE_FOLDER_ID = ROOT_LOCAL if OFFLINE_DEPLOY else _secret_or_env("GDRIVE_FOLDER_ID", None)
+
+# Top bar
+# Node Select (top bar) + manual refresh + LIVE toggle
+# Node Select (top bar) + single Refresh button (no live toggle)
+row_top = st.columns([3,2])
 with row_top[0]:
     node = st.selectbox("Node Select", ["Auckland-Orākei"], index=0, key="node_select_top")
 with row_top[1]:
-    force_offline_ui = st.toggle("Force Offline (local clone)", value=False, help="Disable Drive for this session.")
-with row_top[2]:
-    if st.button("🔄 Clear caches", help="Clear cached data and reload."):
+    if st.button("🔄 Refresh", key=k("btn_refresh_drive"), help="Clear caches & re-index Drive/local data"):
         try:
             st.cache_data.clear()
+            # Clear our own session keys that store Drive children and epoch
             for _k in list(st.session_state.keys()):
                 if str(_k).startswith("drive_kids::") or str(_k).startswith("DRIVE_EPOCH"):
                     del st.session_state[_k]
@@ -235,16 +263,20 @@ with row_top[2]:
         except Exception as e:
             st.warning(f"Refresh encountered a non-fatal error: {e!s}")
 
-GDRIVE_FOLDER_ID = _secret_or_env("GDRIVE_FOLDER_ID", None)
-if OFFLINE_DEPLOY or force_offline_ui or (not st.session_state.get("DRIVE_OPEN", True)):
-    # force local
-    GDRIVE_FOLDER_ID = ROOT_LOCAL
 
-_DRIVE_LOCK = threading.Lock()
+
+# ============================================================================
+# Secrets / Drive
+# ============================================================================
 
 def _normalize_private_key(pk: str) -> str:
     if not isinstance(pk, str): return pk
-    if "\\n" in pk: pk = pk.replace("\\n", "\\n").encode("utf-8").decode("unicode_escape")
+    if "\\n" in pk: pk = pk.replace("\\n", "\n")
+    if "-----BEGIN PRIVATE KEY-----" in pk and "-----END PRIVATE KEY-----" in pk:
+        if "-----BEGIN PRIVATE KEY-----\n" not in pk:
+            pk = pk.replace("-----BEGIN PRIVATE KEY-----", "-----BEGIN PRIVATE KEY-----\n", 1)
+        if "\n-----END PRIVATE KEY-----" not in pk:
+            pk = pk.replace("-----END PRIVATE KEY-----", "\n-----END PRIVATE KEY-----", 1)
     return pk
 
 def _build_drive_client():
@@ -261,158 +293,89 @@ def _build_drive_client():
         creds = service_account.Credentials.from_service_account_info(
             info, scopes=["https://www.googleapis.com/auth/drive.readonly"]
         )
-        with _DRIVE_LOCK:
-            return build("drive", "v3", credentials=creds, cache_discovery=False)
+        return build("drive", "v3", credentials=creds, cache_discovery=False)
     except Exception:
         return None
 
 def get_drive_client():
     if "drive_client" in st.session_state:
         return st.session_state["drive_client"]
-    client = None
-    if isinstance(GDRIVE_FOLDER_ID, str) and not os.path.isdir(GDRIVE_FOLDER_ID):
-        client = _build_drive_client()
+    client = _build_drive_client() if GDRIVE_FOLDER_ID else None
     st.session_state["drive_client"] = client
     return client
 
 def drive_enabled() -> bool:
-    # Offline emulation if GDRIVE_FOLDER_ID is a directory
-    return bool(GDRIVE_FOLDER_ID)
+    return bool(GDRIVE_FOLDER_ID and get_drive_client())
 
-# =================================================================================
-# Drive-like API (online/offline) with atomic downloads & retries
-# =================================================================================
-def _is_offline_root() -> bool:
-    return isinstance(GDRIVE_FOLDER_ID, str) and os.path.isdir(GDRIVE_FOLDER_ID)
+# ============================================================================
+# Drive helpers + epoch (freshness)
+# ============================================================================
 
 @_retry()
-def _drive_list_children_online(folder_id: str, max_items: int = 2000) -> List[Dict[str, Any]]:
-    from googleapiclient.errors import HttpError
-    cli = get_drive_client()
-    if not cli:
-        return []
+def list_children(folder_id: str, max_items: int = 2000) -> List[Dict[str, Any]]:
+    drive = get_drive_client()
+    if not drive: return []
     items, token = [], None
     while True:
         page_size = min(100, max_items - len(items))
         if page_size <= 0: break
-        try:
-            with _DRIVE_LOCK:
-                req = cli.files().list(
-                    q=f"'{folder_id}' in parents and trashed=false",
-                    fields="nextPageToken, files(id,name,mimeType,modifiedTime,size,md5Checksum,parents)",
-                    pageSize=page_size, pageToken=token, orderBy="folder,name_natural",
-                    includeItemsFromAllDrives=True, supportsAllDrives=True, corpora="allDrives",
-                )
-                resp = req.execute(num_retries=2)
-            items.extend(resp.get("files", []))
-            token = resp.get("nextPageToken")
-            if not token: break
-        except HttpError as e:
-            _cb_record(False); raise
-    _cb_record(True)
+        resp = drive.files().list(
+            q=f"'{folder_id}' in parents and trashed=false",
+            fields=("nextPageToken, files(id,name,mimeType,modifiedTime,size,md5Checksum,parents)"),
+            pageSize=page_size, pageToken=token, orderBy="folder,name_natural",
+            includeItemsFromAllDrives=True, supportsAllDrives=True, corpora="allDrives",
+        ).execute()
+        items.extend(resp.get("files", []))
+        token = resp.get("nextPageToken")
+        if not token: break
     return items
 
-def _drive_list_children_offline(folder_path: str, max_items: int = 2000) -> List[Dict[str, Any]]:
-    base = Path(folder_path)
-    if not base.exists() or not base.is_dir():
-        return []
-    items = []
-    for i, entry in enumerate(base.iterdir()):
-        if i >= max_items: break
-        stat = entry.stat()
-        mt = datetime.fromtimestamp(stat.st_mtime).isoformat()
-        items.append({
-            "id": str(entry),
-            "name": entry.name,
-            "mimeType": "application/vnd.google-apps.folder" if entry.is_dir() else "application/octet-stream",
-            "modifiedTime": mt,
-            "size": str(stat.st_size),
-            "md5Checksum": None,
-            "parents": [str(base)],
-        })
-    def _key(m):
-        return (0 if m.get("mimeType")=="application/vnd.google-apps.folder" else 1, m.get("name",""))
-    return sorted(items, key=_key)
-
-def list_children(folder_id: str, max_items: int = 2000) -> List[Dict[str, Any]]:
-    if _is_offline_root():
-        return _drive_list_children_offline(folder_id, max_items=max_items)
-    return _drive_list_children_online(folder_id, max_items=max_items)
-
 @_retry()
-def _download_online(dest: Path, file_id: str) -> Path:
-    from googleapiclient.http import MediaIoBaseDownload
-    cli = get_drive_client()
-    if not cli:
-        raise RuntimeError("Drive not configured")
-    req = cli.files().get_media(fileId=file_id)
-    tmp = dest.with_suffix(dest.suffix + ".part")
-    with _DRIVE_LOCK:
-        with open(tmp, "wb") as fh:
-            downloader = MediaIoBaseDownload(fh, req)
-            done = False
-            while not done:
-                _, done = downloader.next_chunk()
-    os.replace(tmp, dest)
-    _cb_record(True)
-    return dest
-
-def _download_offline(dest: Path, src_path: str) -> Path:
-    tmp = dest.with_suffix(dest.suffix + ".part")
-    import shutil
-    shutil.copyfile(src_path, tmp)
-    os.replace(tmp, dest)
-    return dest
-
 def download_to(path: Path, file_id: str, force: bool = False) -> Path:
+    drive = get_drive_client()
+    from googleapiclient.http import MediaIoBaseDownload
     path.parent.mkdir(parents=True, exist_ok=True)
     if (not force) and path.exists():
         return path
-    lock = _acquire_lock(path.with_suffix(path.suffix + ".lock"), timeout=8)
-    try:
-        if _is_offline_root():
-            if os.path.isfile(file_id):
-                return _download_offline(path, file_id)
-            src = Path(file_id)
-            if src.exists() and src.is_file():
-                return _download_offline(path, str(src))
-            return path
-        else:
-            return _download_online(path, file_id)
-    except Exception:
-        _cb_record(False)
-        raise
-    finally:
-        if lock:
-            _release_lock(lock)
+    req = drive.files().get_media(fileId=file_id)
+    with open(path, "wb") as fh:
+        downloader = MediaIoBaseDownload(fh, req)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+    return path
 
-# =================================================================================
-# Epoch & cached children
-# =================================================================================
 @st.cache_data(ttl=180, show_spinner=False)
 @_retry()
 def _compute_drive_epoch(root_id: str, nocache: str = "stable") -> str:
-    try:
-        kids = list_children(root_id, max_items=2000)
-        root_max = max((k.get("modifiedTime","") for k in kids), default="")
-        back_max = ""
-        # Find Backup
-        for k in kids:
-            if k.get("mimeType") == "application/vnd.google-apps.folder" and k.get("name","").lower()=="backup":
-                bk = list_children(k.get("id"), max_items=2000)
-                back_max = max((x.get("modifiedTime","") for x in bk), default="")
-                break
-        token = "|".join([root_max, back_max])
-        return token or time.strftime("%Y%m%d%H%M%S")
-    except Exception:
-        return "no-drive"
+    #...
+
+    drive = get_drive_client()
+    if not drive: return "no-drive"
+    def _max_mtime(kids: List[Dict[str, Any]]) -> str:
+        if not kids: return ""
+        return max((k.get("modifiedTime","") for k in kids), default="")
+    root_kids = list_children(root_id, max_items=2000)
+    root_max  = _max_mtime(root_kids)
+    bkid = None
+    for k in root_kids:
+        if k.get("mimeType") == "application/vnd.google-apps.folder" and k.get("name","").lower() == "backup":
+            bkid = k.get("id")
+            break
+    back_max = ""
+    if bkid:
+        back_kids = list_children(bkid, max_items=2000)
+        back_max  = _max_mtime(back_kids)
+    token = "|".join([root_max, back_max])
+    return token or time.strftime("%Y%m%d%H%M%S")
 
 def _ensure_epoch_key():
     if not drive_enabled():
         return
     try:
         new_epoch = _compute_drive_epoch(GDRIVE_FOLDER_ID, nocache="stable")
-    except Exception:
+    except Exception as e:
+        # Non-fatal: keep old epoch, but surface a gentle warning
         st.sidebar.warning("Drive indexing hiccup (using last known state).")
         return
     old_epoch = st.session_state.get("DRIVE_EPOCH")
@@ -422,45 +385,20 @@ def _ensure_epoch_key():
         st.cache_data.clear()
         st.session_state["DRIVE_EPOCH"] = new_epoch
 
+
 _ensure_epoch_key()
 
 def _folder_children_cached(folder_id: str) -> List[Dict[str, Any]]:
     epoch = st.session_state.get("DRIVE_EPOCH", "0")
     key = f"drive_kids::{epoch}::{folder_id}"
     if key not in st.session_state:
-        try:
-            st.session_state[key] = list_children(folder_id, max_items=2000)
-        except Exception as e:
-            st.session_state[key] = []
-            st.warning(f"Drive list error (non-fatal): {e!s}")
+        st.session_state[key] = list_children(folder_id, max_items=2000)
     return st.session_state[key]
 
-# =================================================================================
-# Helpers shared across tabs
-# =================================================================================
-def _parse_chunk_filename(name: str) -> Optional[Dict[str, Any]]:
-    m = CHUNK_RE.match(name or "")
-    if not m:
-        return None
-    try:
-        return {
-            "root":  m.group("root"),
-            "tag":   m.group("tag").lower(),
-            "s":     float(m.group("s")),
-            "e":     float(m.group("e")),
-            "label": m.group("label"),
-            "conf":  float(m.group("conf")),
-        }
-    except Exception:
-        return None
 
 def ensure_csv_cached(meta: Dict[str, Any], subdir: str, cache_epoch: str = "", force: bool = False) -> Path:
     local_path = (CSV_CACHE / subdir / meta["name"])
-    try:
-        return download_to(local_path, meta["id"], force=force)
-    except Exception as e:
-        st.warning(f"CSV download failed (non-fatal): {e!s}")
-        return local_path  # may not exist; upstream guards handle empties
+    return download_to(local_path, meta["id"], force=force)
 
 def ensure_chunk_cached(chunk_name: str, folder_id: str, subdir: str, force: bool = False) -> Optional[Path]:
     local_path = CHUNK_CACHE / subdir / chunk_name
@@ -479,14 +417,17 @@ def ensure_chunk_cached(chunk_name: str, folder_id: str, subdir: str, force: boo
     target = _parse_chunk_filename(chunk_name)
     if not target:
         return None
-    root_t, tag_t = target["root"], target["tag"]
-    s_t, e_t = target["s"], target["e"]
+
+    root_t  = target["root"]
+    tag_t   = target["tag"]
+    s_t     = target["s"]; e_t = target["e"]
     label_t = target["label"].lower()
 
     candidates = []
     for k in kids:
         nm = k.get("name","")
-        if not nm.lower().endswith(".wav"): continue
+        if not nm.lower().endswith(".wav"):
+            continue
         info = _parse_chunk_filename(nm)
         if not info: continue
         if info["root"] == root_t and info["tag"] == tag_t and info["label"].lower() == label_t:
@@ -510,9 +451,25 @@ def ensure_chunk_cached(chunk_name: str, folder_id: str, subdir: str, force: boo
     except Exception:
         return None
 
-# =================================================================================
-# Root CSV logic (Tab 1)
-# =================================================================================
+def _parse_chunk_filename(name: str) -> Optional[Dict[str, Any]]:
+    m = CHUNK_RE.match(name or "")
+    if not m:
+        return None
+    try:
+        return {
+            "root":  m.group("root"),
+            "tag":   m.group("tag").lower(),
+            "s":     float(m.group("s")),
+            "e":     float(m.group("e")),
+            "label": m.group("label"),
+            "conf":  float(m.group("conf")),
+        }
+    except Exception:
+        return None
+
+# ============================================================================
+# Tab 1 helpers — list/standardize across old & new root CSVs
+# ============================================================================
 @st.cache_data(show_spinner=False)
 def list_csvs_local(root: str) -> Tuple[List[str], List[str]]:
     bn_paths = sorted(glob.glob(os.path.join(root, "bn*.csv")))
@@ -523,7 +480,7 @@ def list_csvs_local(root: str) -> Tuple[List[str], List[str]]:
 
 @st.cache_data(show_spinner=False)
 def list_csvs_drive_root(folder_id: str, cache_epoch: str, nocache: str = "stable") -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    kids = _folder_children_cached(folder_id)
+    kids = list_children(folder_id, max_items=2000)
     bn, kn = [], []
     for k in kids:
         n = k.get("name","")
@@ -571,7 +528,7 @@ def extract_dates_from_csv(path: str | Path) -> List[date]:
     path = str(path)
     dates = set()
     try:
-        for chunk in pd.read_csv(path, chunksize=5000, low_memory=False, on_bad_lines='skip'):
+        for chunk in pd.read_csv(path, chunksize=5000):
             if "ActualStartTime" in chunk.columns:
                 s = pd.to_datetime(chunk["ActualStartTime"], errors="coerce")
             else:
@@ -593,15 +550,11 @@ def build_date_index(paths: List[Path], kind: str) -> Dict[date, List[str]]:
 
 @st.cache_data(show_spinner=False)
 def load_csv(path: str | Path) -> pd.DataFrame:
-    try:
-        return pd.read_csv(str(path), low_memory=False, on_bad_lines='skip')
-    except Exception:
-        # Graceful fallback
-        return pd.DataFrame()
+    return pd.read_csv(str(path))
 
-# =================================================================================
+# ============================================================================
 # Snapshot/master logic for Tab 2
-# =================================================================================
+# ============================================================================
 def _sanitize_label(s: str) -> str:
     s = str(s or "")
     s = re.sub(r"[^A-Za-z0-9]+", "_", s).strip("_")
@@ -625,27 +578,27 @@ def _parse_date_from_snapname(name: str) -> Optional[date]:
         return None
 
 def _find_backup_folder(root_folder_id: str) -> Optional[Dict[str, Any]]:
-    kids = _folder_children_cached(root_folder_id)
+    kids = list_children(root_folder_id, max_items=2000)
     for k in kids:
         if k.get("mimeType") == "application/vnd.google-apps.folder" and k.get("name","").lower() == "backup":
             return k
     return None
 
 def _find_chunk_dirs(snapshot_id: str) -> Dict[str, str]:
-    kids = _folder_children_cached(snapshot_id)
+    kids = list_children(snapshot_id, max_items=2000)
     kn = [k for k in kids if k.get("mimeType")=="application/vnd.google-apps.folder" and "koreronet" in k.get("name","").lower()]
     bn = [k for k in kids if k.get("mimeType")=="application/vnd.google-apps.folder" and "birdnet"   in k.get("name","").lower()]
     return {"KN": (kn[0]["id"] if kn else snapshot_id), "BN": (bn[0]["id"] if bn else snapshot_id)}
 
 def _find_named_in_snapshot(snapshot_id: str, exact_name: str) -> Optional[Dict[str, Any]]:
-    kids = _folder_children_cached(snapshot_id)
+    kids = list_children(snapshot_id, max_items=2000)
     files_only = [f for f in kids if f.get("mimeType") != "application/vnd.google-apps.folder"]
     for f in files_only:
         if f.get("name","").lower() == exact_name.lower():
             return f
     subfolders = [f for f in kids if f.get("mimeType") == "application/vnd.google-apps.folder"]
     for sf in subfolders:
-        sub_files = _folder_children_cached(sf["id"])
+        sub_files = list_children(sf["id"], max_items=2000)
         for f in sub_files:
             if f.get("mimeType") != "application/vnd.google-apps.folder" and f.get("name","").lower() == exact_name.lower():
                 return f
@@ -667,7 +620,7 @@ def build_master_index_by_snapshot_date(root_folder_id: str, cache_epoch: str, n
             "ChunkDriveFolderId","SnapId","SnapName"
         ])
 
-    snaps = [k for k in _folder_children_cached(backup["id"])
+    snaps = [k for k in list_children(backup["id"], max_items=2000)
              if k.get("mimeType")=="application/vnd.google-apps.folder" and SNAP_RE.match(k.get("name",""))]
     snaps.sort(key=lambda m: m.get("name",""), reverse=True)
 
@@ -683,7 +636,7 @@ def build_master_index_by_snapshot_date(root_folder_id: str, cache_epoch: str, n
             if kn_meta:
                 kn_csv = ensure_csv_cached(kn_meta, subdir=f"snap_{snap_id}/koreronet", cache_epoch=cache_epoch, force=False)
                 try:
-                    df = pd.read_csv(kn_csv, low_memory=False, on_bad_lines='skip')
+                    df = pd.read_csv(kn_csv)
                     for _, r in df.iterrows():
                         clip  = str(r.get("Clip","")).strip()
                         lab   = str(r.get("Label","Unknown"))
@@ -701,7 +654,7 @@ def build_master_index_by_snapshot_date(root_folder_id: str, cache_epoch: str, n
             if bn_meta:
                 bn_csv = ensure_csv_cached(bn_meta, subdir=f"snap_{snap_id}/birdnet", cache_epoch=cache_epoch, force=False)
                 try:
-                    df = pd.read_csv(bn_csv, low_memory=False, on_bad_lines='skip')
+                    df = pd.read_csv(bn_csv)
                     for _, r in df.iterrows():
                         clip  = str(r.get("Clip","")).strip()
                         lab   = str(r.get("Label", r.get("Common name","Unknown")))
@@ -715,13 +668,13 @@ def build_master_index_by_snapshot_date(root_folder_id: str, cache_epoch: str, n
                 except Exception:
                     pass
         else:
-            root_kids = _folder_children_cached(snap_id)
+            root_kids = list_children(snap_id, max_items=2000)
             files_only = [f for f in root_kids if f.get("mimeType") != "application/vnd.google-apps.folder"]
 
             kn_legacy = [f for f in files_only if _match_legacy_master_name(f.get("name",""), "KN")]
             if not kn_legacy:
                 for sf in [f for f in root_kids if f.get("mimeType") == "application/vnd.google-apps.folder"]:
-                    cand = [f for f in _folder_children_cached(sf["id"])
+                    cand = [f for f in list_children(sf["id"], max_items=2000)
                             if f.get("mimeType") != "application/vnd.google-apps.folder"
                             and _match_legacy_master_name(f.get("name", ""), "KN")]
                     if cand:
@@ -732,7 +685,7 @@ def build_master_index_by_snapshot_date(root_folder_id: str, cache_epoch: str, n
                 meta = kn_legacy[0]
                 kn_csv = ensure_csv_cached(meta, subdir=f"snap_{snap_id}/koreronet", cache_epoch=cache_epoch, force=False)
                 try:
-                    df = pd.read_csv(kn_csv, low_memory=False, on_bad_lines='skip')
+                    df = pd.read_csv(kn_csv)
                     for _, r in df.iterrows():
                         wav = os.path.basename(str(r.get("File","")))
                         start = float(r.get("Start", r.get("Start (s)", np.nan)))
@@ -752,7 +705,7 @@ def build_master_index_by_snapshot_date(root_folder_id: str, cache_epoch: str, n
             bn_legacy = [f for f in files_only if _match_legacy_master_name(f.get("name",""), "BN")]
             if not bn_legacy:
                 for sf in [f for f in root_kids if f.get("mimeType") == "application/vnd.google-apps.folder"]:
-                    cand = [f for f in _folder_children_cached(sf["id"])
+                    cand = [f for f in list_children(sf["id"], max_items=2000)
                             if f.get("mimeType") != "application/vnd.google-apps.folder"
                             and _match_legacy_master_name(f.get("name",""), "BN")]
                     if cand: bn_legacy = cand; break
@@ -761,7 +714,7 @@ def build_master_index_by_snapshot_date(root_folder_id: str, cache_epoch: str, n
                 meta = bn_legacy[0]
                 bn_csv = ensure_csv_cached(meta, subdir=f"snap_{snap_id}/birdnet", cache_epoch=cache_epoch, force=False)
                 try:
-                    df = pd.read_csv(bn_csv, low_memory=False, on_bad_lines='skip')
+                    df = pd.read_csv(bn_csv)
                     for _, r in df.iterrows():
                         wav = os.path.basename(str(r.get("File","")))
                         start = float(r.get("Start (s)", r.get("Start", np.nan)))
@@ -788,17 +741,249 @@ def build_master_index_by_snapshot_date(root_folder_id: str, cache_epoch: str, n
     out.reset_index(drop=True, inplace=True)
     return out
 
-# =================================================================================
-# Offline emulation for list/download when ROOT_LOCAL is a folder id
-# (We re-use the same helpers above by passing local paths as "ids")
-# =================================================================================
-if _is_offline_root():
-    def drive_enabled() -> bool:  # override to true so tabs work
+# ============================================================================
+# Offline overrides — emulate Google Drive using local filesystem
+# ============================================================================
+if OFFLINE_DEPLOY:
+    GDRIVE_FOLDER_ID = ROOT_LOCAL  # type: ignore
+
+    import datetime as _dt
+    from typing import Iterable as _Iterable
+
+    def _mime_for_path(_p: Path) -> str:
+        return (
+            "application/vnd.google-apps.folder" if _p.is_dir() else "application/octet-stream"
+        )
+
+    def drive_enabled() -> bool:  # override
         return True
 
-# =================================================================================
-# Welcome overlay (unchanged behavior; safer summariser)
-# =================================================================================
+    def get_drive_client():  # override
+        return "offline"
+
+    def list_children(folder_id: str, max_items: int = 2000):  # override
+        base = Path(folder_id)
+        items = []
+        if not base.exists() or not base.is_dir():
+            return []
+        for i, entry in enumerate(base.iterdir()):
+            if i >= max_items:
+                break
+            stat = entry.stat()
+            mt = _dt.datetime.fromtimestamp(stat.st_mtime).isoformat()
+            items.append({
+                "id": str(entry),
+                "name": entry.name,
+                "mimeType": _mime_for_path(entry),
+                "modifiedTime": mt,
+                "size": str(stat.st_size),
+                "md5Checksum": None,
+                "parents": [str(base)],
+            })
+        def _key(m):
+            return (0 if m.get("mimeType")=="application/vnd.google-apps.folder" else 1, m.get("name",""))
+        return sorted(items, key=_key)
+
+    def download_to(path: Path, file_id: str, force: bool = False) -> Path:  # override
+        src = Path(file_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if (not force) and path.exists():
+            return path
+        if src.exists() and src.is_file():
+            import shutil as _shutil
+            _shutil.copyfile(src, path)
+            return path
+        return path
+
+    def _folder_children_cached(folder_id: str):
+        epoch = st.session_state.get("DRIVE_EPOCH", "0")
+        key = f"drive_kids::{epoch}::{folder_id}"
+        if key not in st.session_state:
+            st.session_state[key] = list_children(folder_id, max_items=2000)
+        return st.session_state[key]
+
+    def ensure_chunk_cached(chunk_name: str, folder_id: str, subdir: str, force: bool = False):
+        local_path = CHUNK_CACHE / subdir / chunk_name
+        if (not force) and local_path.exists():
+            return local_path
+        folder = Path(folder_id)
+        try:
+            exact = folder / chunk_name
+            if exact.exists():
+                import shutil as _shutil
+                local_path.parent.mkdir(parents=True, exist_ok=True)
+                _shutil.copyfile(exact, local_path)
+                return local_path
+        except Exception:
+            pass
+
+        target = _parse_chunk_filename(chunk_name)
+        if not target or (not folder.exists()):
+            return None
+        root_t, tag_t = target["root"], target["tag"]
+        s_t, e_t = target["s"], target["e"]
+        label_t = target["label"].lower()
+
+        candidates = []
+        for p in folder.glob("*.wav"):
+            nm = p.name
+            info = _parse_chunk_filename(nm)
+            if not info:
+                continue
+            if info["root"] == root_t and info["tag"] == tag_t and info["label"].lower() == label_t:
+                candidates.append((info, nm))
+        if not candidates:
+            return None
+
+        tol = 0.75
+        def score(cinfo):
+            s_c, e_c = cinfo["s"], cinfo["e"]
+            contains = (s_c - tol) <= s_t and (e_c + tol) >= e_t
+            cen_diff = abs(((s_c + e_c) * 0.5) - ((s_t + e_t) * 0.5))
+            return (0 if contains else 1, cen_diff)
+
+        candidates.sort(key=lambda it: score(it[0]))
+        best_name = candidates[0][1]
+        try:
+            import shutil as _shutil
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            _shutil.copyfile(folder / best_name, local_path)
+            st.caption(f"⚠️ Used fuzzy match: requested `{chunk_name}` → found `{best_name}`")
+            return local_path
+        except Exception:
+            return None
+
+    def find_subfolder_by_name(root_id: str, name_ci: str):
+        kids = list_children(root_id, max_items=2000)
+        for k in kids:
+            if k.get("mimeType") == "application/vnd.google-apps.folder" and k.get("name", "").lower() == name_ci.lower():
+                return k
+        return None
+
+    @st.cache_data(show_spinner=True)
+    def build_master_index_by_snapshot_date(root_folder_id: str, cache_epoch: str, nocache: str = "stable"):
+        backup_path = Path(root_folder_id) / "Backup"
+        if not backup_path.exists():
+            return pd.DataFrame(columns=[
+                "Date","Kind","Label","Confidence","Start","End","WavBase","ChunkName",
+                "ChunkDriveFolderId","SnapId","SnapName"
+            ])
+
+        snaps = [p for p in backup_path.iterdir() if p.is_dir() and SNAP_RE.match(p.name)]
+        snaps.sort(key=lambda p: p.name, reverse=True)
+
+        rows = []
+        for sn in snaps:
+            snap_name = sn.name
+            m = SNAP_RE.match(snap_name)
+            if not m:
+                continue
+            try:
+                snap_date = _dt.datetime.strptime(m.group(1), "%Y%m%d").date()
+            except Exception:
+                continue
+
+            kn_dir = next((p for p in sn.iterdir() if p.is_dir() and "koreronet" in p.name.lower()), sn)
+            bn_dir = next((p for p in sn.iterdir() if p.is_dir() and "birdnet" in p.name.lower()), sn)
+
+            if snap_date >= CUTOFF_NEW:
+                kn_csv = sn / "koreronet_master.csv"
+                if kn_csv.exists():
+                    try:
+                        df = pd.read_csv(kn_csv)
+                        for _, r in df.iterrows():
+                            rows.append({
+                                "Date": snap_date, "Kind": "KN",
+                                "Label": str(r.get("Label","Unknown")),
+                                "Confidence": float(r.get("Probability", np.nan)),
+                                "Start": np.nan, "End": np.nan, "WavBase": "",
+                                "ChunkName": str(r.get("Clip","")),
+                                "ChunkDriveFolderId": str(kn_dir),
+                                "SnapId": str(sn), "SnapName": snap_name,
+                            })
+                    except Exception:
+                        pass
+                bn_csv = sn / "birdnet_master.csv"
+                if bn_csv.exists():
+                    try:
+                        df = pd.read_csv(bn_csv)
+                        for _, r in df.iterrows():
+                            rows.append({
+                                "Date": snap_date, "Kind": "BN",
+                                "Label": str(r.get("Label", r.get("Common name","Unknown"))),
+                                "Confidence": float(r.get("Probability", r.get("Confidence", np.nan))),
+                                "Start": np.nan, "End": np.nan, "WavBase": "",
+                                "ChunkName": str(r.get("Clip","")),
+                                "ChunkDriveFolderId": str(bn_dir),
+                                "SnapId": str(sn), "SnapName": snap_name,
+                            })
+                    except Exception:
+                        pass
+            else:
+                def _find_legacy(kind: str):
+                    pat = "koreronet" if kind=="KN" else "birdnet"
+                    cands = [p for p in sn.iterdir() if p.is_file() and (pat in p.name.lower()) and ("detect" in p.name.lower()) and p.suffix.lower()==".csv"]
+                    if not cands:
+                        for sub in (p for p in sn.iterdir() if p.is_dir()):
+                            cands = [p for p in sub.iterdir() if p.is_file() and (pat in p.name.lower()) and ("detect" in p.name.lower()) and p.suffix.lower()==".csv"]
+                            if cands:
+                                break
+                    return sorted(cands, key=lambda p: p.stat().st_mtime, reverse=True)[:1]
+
+                kn_legacy = _find_legacy("KN")
+                if kn_legacy:
+                    try:
+                        df = pd.read_csv(kn_legacy[0])
+                        for _, r in df.iterrows():
+                            wav = os.path.basename(str(r.get("File","")))
+                            start = float(r.get("Start", r.get("Start (s)", np.nan)))
+                            end   = float(r.get("End",   r.get("End (s)",   np.nan)))
+                            lab   = str(r.get("Label","Unknown"))
+                            conf  = float(r.get("Confidence", np.nan))
+                            rows.append({
+                                "Date": snap_date, "Kind": "KN", "Label": lab, "Confidence": conf,
+                                "Start": start, "End": end, "WavBase": wav,
+                                "ChunkName": _compose_chunk_name("kn", wav, start, end, lab, conf),
+                                "ChunkDriveFolderId": str(kn_dir),
+                                "SnapId": str(sn), "SnapName": snap_name,
+                            })
+                    except Exception:
+                        pass
+
+                bn_legacy = _find_legacy("BN")
+                if bn_legacy:
+                    try:
+                        df = pd.read_csv(bn_legacy[0])
+                        for _, r in df.iterrows():
+                            wav = os.path.basename(str(r.get("File","")))
+                            start = float(r.get("Start (s)", r.get("Start", np.nan)))
+                            end   = float(r.get("End (s)",   r.get("End",   np.nan)))
+                            lab   = str(r.get("Common name", r.get("Label","Unknown")))
+                            conf  = float(r.get("Confidence", np.nan))
+                            rows.append({
+                                "Date": snap_date, "Kind": "BN", "Label": lab, "Confidence": conf,
+                                "Start": start, "End": end, "WavBase": wav,
+                                "ChunkName": _compose_chunk_name("bn", wav, start, end, lab, conf),
+                                "ChunkDriveFolderId": str(bn_dir),
+                                "SnapId": str(sn), "SnapName": snap_name,
+                            })
+                    except Exception:
+                        pass
+
+        if not rows:
+            return pd.DataFrame(columns=[
+                "Date","Kind","Label","Confidence","Start","End","WavBase","ChunkName",
+                "ChunkDriveFolderId","SnapId","SnapName"
+            ])
+        out = pd.DataFrame(rows)
+        out.sort_values(["Date","Kind","Label"], ascending=[False, True, True], inplace=True)
+        out.reset_index(drop=True, inplace=True)
+        return out
+
+# ============================================================================
+# ------- NEW: Welcome overlay (latest detections top-3 sentence) -----------
+# ============================================================================
+
 def _human_day(d: date) -> str:
     today = datetime.now().date()
     if d == today: return "Today"
@@ -806,6 +991,7 @@ def _human_day(d: date) -> str:
     return d.strftime("%A, %d %b %Y")
 
 def _safe_plural(n: int, noun: str) -> str:
+    # “53 Tui”, “1 Tui” — most NZ bird common names are invariant in plural here.
     return f"{n:,} {noun}"
 
 def _join_top(items: List[Tuple[str, int]]) -> str:
@@ -818,24 +1004,25 @@ def _join_top(items: List[Tuple[str, int]]) -> str:
 
 @st.cache_data(show_spinner=False)
 def _latest_root_summary(root_id_or_path: str, live: bool) -> Tuple[Optional[str], Optional[date], pd.DataFrame]:
+    """Returns (mode_label, chosen_date, merged_df_for_that_day)."""
     cache_epoch = st.session_state.get("DRIVE_EPOCH", "0")
-    try:
-        if drive_enabled():
-            bn_meta, kn_meta = list_csvs_drive_root(root_id_or_path, cache_epoch=cache_epoch)
-            if bn_meta or kn_meta:
-                bn_paths = [ensure_csv_cached(m, subdir="root/bn", cache_epoch=cache_epoch, force=False) for m in bn_meta]
-                kn_paths = [ensure_csv_cached(m, subdir="root/kn", cache_epoch=cache_epoch, force=False) for m in kn_meta]
-            else:
-                bn_paths, kn_paths = [], []
+    # Get metadata/paths for root CSVs
+    if drive_enabled():
+        bn_meta, kn_meta = list_csvs_drive_root(root_id_or_path, cache_epoch=cache_epoch)
+        if bn_meta or kn_meta:
+            bn_paths = [ensure_csv_cached(m, subdir="root/bn", cache_epoch=cache_epoch, force=live) for m in bn_meta]
+            kn_paths = [ensure_csv_cached(m, subdir="root/kn", cache_epoch=cache_epoch, force=live) for m in kn_meta]
         else:
-            bn_local, kn_local = list_csvs_local(ROOT_LOCAL)
-            bn_paths = [Path(p) for p in bn_local]
-            kn_paths = [Path(p) for p in kn_local]
-    except Exception:
-        bn_paths, kn_paths = [], []
+            bn_paths, kn_paths = [], []
+    else:
+        bn_local, kn_local = list_csvs_local(ROOT_LOCAL)
+        bn_paths = [Path(p) for p in bn_local]
+        kn_paths = [Path(p) for p in kn_local]
 
+    # Build date indices
     bn_by_date = build_date_index(bn_paths, "bn") if bn_paths else {}
     kn_by_date = build_date_index(kn_paths, "kn") if kn_paths else {}
+
     if not bn_by_date and not kn_by_date:
         return None, None, pd.DataFrame()
 
@@ -844,11 +1031,16 @@ def _latest_root_summary(root_id_or_path: str, live: bool) -> Tuple[Optional[str
     both     = sorted(bn_dates & kn_dates)
     either   = sorted(bn_dates | kn_dates)
 
+    # Prefer a date where BOTH exist, else latest of either
     if both:
-        chosen = both[-1]; mode_label = "Combined"
+        chosen = both[-1]
+        mode_label = "Combined"
     else:
-        chosen = either[-1]; mode_label = "BirdNET (bn)" if chosen in bn_dates else "KōreroNET (kn)"
+        chosen = either[-1]
+        # describe which one it is
+        mode_label = "BirdNET (bn)" if chosen in bn_dates else "KōreroNET (kn)"
 
+    # Load/standardize filtered by chosen date
     def _load_and_filter(paths: List[Path], kind: str, day_selected: date):
         frames = []
         for p in paths:
@@ -864,18 +1056,32 @@ def _latest_root_summary(root_id_or_path: str, live: bool) -> Tuple[Optional[str
     df_bn = _load_and_filter(bn_by_date.get(chosen, []), "bn", chosen) if chosen in bn_by_date else pd.DataFrame()
     df_kn = _load_and_filter(kn_by_date.get(chosen, []), "kn", chosen) if chosen in kn_by_date else pd.DataFrame()
     merged = pd.concat([df_bn, df_kn], ignore_index=True) if not df_bn.empty or not df_kn.empty else (df_bn if not df_bn.empty else df_kn)
+
     return mode_label, chosen, merged
 
 def _render_welcome_overlay():
+    # Only show once per session unless user refreshes cache
     if st.session_state.get("__welcome_done__", False):
         return
     with st.spinner("Summarising latest detections…"):
         mode, chosen_date, df = _latest_root_summary(GDRIVE_FOLDER_ID, False)
+    # Soft gate: show overlay, skip rendering tabs until user continues
     overlay = st.empty()
     with overlay.container():
+        # Start of overlay card
         st.markdown('<div class="overlay-card">', unsafe_allow_html=True)
+        # Heading for the overlay: include both technology and summary sections
         st.markdown('<div class="overlay-title">KōreroNET</div>', unsafe_allow_html=True)
+        
+        # ------------------------------------------------------------------
+        # Technology highlights
+        # ------------------------------------------------------------------
+        # Introduce a subheading for our technology showcase
         st.markdown('<div class="overlay-sub">Our Technology Highlights</div>', unsafe_allow_html=True)
+        # Define a set of features (icon, description). Icons use emoji for
+        # broad browser support without external assets. Feel free to tweak or
+        # extend this list – these represent the core capabilities of the
+        # bioacoustic monitoring platform.
         features: List[Tuple[str, str]] = [
             ('🔊', 'Bioacoustic monitoring of all vocal species in New Zealand wildlife.'),
             ('🎧', 'Full-spectrum recording: ultrasonic and audible ranges.'),
@@ -888,109 +1094,187 @@ def _render_welcome_overlay():
             ('🐦', 'Detects both pests and birds of interest.'),
             ('📁', 'Provides accessible recordings of species of interest.')
         ]
+        # Build the HTML for the grid of feature cards
         feature_html = '<div class="features-grid">'
         for icon, text in features:
             feature_html += f'<div class="feature-card"><div class="feature-icon">{icon}</div><div class="feature-text">{text}</div></div>'
         feature_html += '</div>'
         st.markdown(feature_html, unsafe_allow_html=True)
+        
+        # Separator before the summary section
         st.markdown('<hr style="border:0; border-top:1px solid #444; margin:1.5rem 0; opacity:0.4;">', unsafe_allow_html=True)
+        
+        # ------------------------------------------------------------------
+        # Latest field summary
+        # ------------------------------------------------------------------
         st.markdown('<div class="overlay-sub">Latest Field Summary</div>', unsafe_allow_html=True)
         if df is None or df.empty or chosen_date is None:
             st.markdown('<div class="overlay-sub">No parsable detections found in the most recent root CSVs.</div>', unsafe_allow_html=True)
         else:
+            # Count per Label (no confidence filter here; this is a raw snapshot)
             counts = df["Label"].astype(str).value_counts()
             top = [(lbl, int(counts[lbl])) for lbl in counts.index[:3]]
             nice_day = _human_day(chosen_date)
             sentence = f"{nice_day} we detected {_join_top(top)}."
             st.markdown(f'<div class="overlay-sub">{sentence}</div>', unsafe_allow_html=True)
-            total = int(counts.sum()); uniq = int(counts.shape[0])
+            # Tiny “pills” for context
+            total = int(counts.sum())
+            uniq  = int(counts.shape[0])
             st.markdown(f"""
                 <div class="overlay-pill">Mode: {mode or '—'}</div>
                 <div class="overlay-pill">Date: {chosen_date.isoformat() if chosen_date else '—'}</div>
                 <div class="overlay-pill">Detections: {total:,}</div>
                 <div class="overlay-pill">Species: {uniq:,}</div>
             """, unsafe_allow_html=True)
-        c1, _ = st.columns([1,5])
+        
+        # Action row with continue button
+        c1, c2 = st.columns([1,5])
         with c1:
             if st.button("Continue →", type="primary", key=k("welcome_continue")):
                 st.session_state["__welcome_done__"] = True
                 st.rerun()
+
+        # Close overlay-card wrapper
         st.markdown('</div>', unsafe_allow_html=True)
+    # Block tabs on first paint
     st.stop()
 
+# Show the overlay once per session (after splash, before tabs)
 _render_welcome_overlay()
+@st.cache_data(show_spinner=False)
+def list_autostart_logs(raw_folder_id: str, cache_epoch: str, nocache: str = "stable") -> List[Dict[str, Any]]:
+    """Return files under /Power logs/raw matching *__gui_autostart.log, newest first."""
+    kids = list_children(raw_folder_id, max_items=2000)
+    files = [k for k in kids
+             if k.get("mimeType") != "application/vnd.google-apps.folder"
+             and LOG_AUTOSTART_RE.match(k.get("name",""))]
+    # Prefer filename sort (timestamp is baked in); fall back to modifiedTime if needed
+    files.sort(key=lambda m: (m.get("name",""), m.get("modifiedTime","")), reverse=True)
+    return files
 
-# =================================================================================
-# Tab structure
-# =================================================================================
+@st.cache_data(show_spinner=False)
+def ensure_raw_cached(meta: Dict[str, Any], force: bool = False) -> Path:
+    """Download a raw log file to the POWER_CACHE folder."""
+    local_path = POWER_CACHE / meta["name"]
+    return download_to(local_path, meta["id"], force=force)
+
+# ============================================================================
+# Tabs
+# ============================================================================
 tab_nodes, tab1, tab_verify, tab3, tab4 = st.tabs(["🗺️ Nodes", "📊 Detections", "🎧 Verify recordings", "⚡ Power", "📝 log"])
 
 # ==================================
-# TAB — Nodes (map fallbacks)
+# TAB — Nodes (stable map fallback)
 # ==================================
 with tab_nodes:
     st.subheader("Choose a node")
-    _df_nodes = pd.DataFrame([{"lat": n["lat"], "lon": n["lon"], "name": n["name"], "key": n["key"], "desc": n["desc"]} for n in NODES])
+
+    _df_nodes = pd.DataFrame(
+        [{"lat": n["lat"], "lon": n["lon"], "name": n["name"], "key": n["key"], "desc": n["desc"]} for n in NODES]
+    )
+
+    # ---- stable selection state (do NOT write to widget keys) ----
+    default_active = (
+        st.session_state.get("active_node")
+        or st.session_state.get("node_select_top")  # legacy read-only
+        or NODE_KEYS[0]
+    )
     if "active_node" not in st.session_state:
-        st.session_state["active_node"] = NODE_KEYS[0]
-    node_choice = st.selectbox("Active node", NODE_KEYS, index=NODE_KEYS.index(st.session_state["active_node"]), key=k("node_select_choice"))
-    colA, colB = st.columns([1,4])
-    with colA:
+        st.session_state["active_node"] = default_active
+
+    node_choice = st.selectbox(
+        "Active node",
+        NODE_KEYS,
+        index=NODE_KEYS.index(st.session_state["active_node"]) if st.session_state["active_node"] in NODE_KEYS else 0,
+        key=k("node_select_choice"),
+    )
+
+    set_col1, set_col2 = st.columns([1, 4])
+    with set_col1:
         if st.button("Set as active node", key=k("apply_node_box")):
-            st.session_state["active_node"] = node_choice
+            st.session_state["active_node"] = node_choice  # <- only update our own key
             st.success(f"Active node set to: {node_choice}")
             st.rerun()
+
+    # Center on the active node
     try:
-        _center = _df_nodes[_df_nodes["key"] == st.session_state["active_node"]][["lat","lon"]].iloc[0].to_dict()
+        _center = _df_nodes[_df_nodes["key"] == st.session_state["active_node"]][["lat", "lon"]].iloc[0].to_dict()
         center_lat, center_lon = float(_center["lat"]), float(_center["lon"])
     except Exception:
         center_lat, center_lon = -36.8528, 174.8150
 
+    # ----- map fallbacks (folium → pydeck → plain plotly) -----
     rendered = False
     try:
         import folium
         from streamlit_folium import st_folium
         m = folium.Map(location=[center_lat, center_lon], zoom_start=12, control_scale=True, tiles="OpenStreetMap")
         for _, r in _df_nodes.iterrows():
-            folium.Circle(location=[float(r["lat"]), float(r["lon"])], radius=150, color=None, fill=True, fill_opacity=0.18, fill_color="#ff0000").add_to(m)
-            folium.CircleMarker(location=[float(r["lat"]), float(r["lon"])], radius=16, color=None, fill=True, fill_color="#ffffff", fill_opacity=1.0).add_to(m)
-            folium.CircleMarker(location=[float(r["lat"]), float(r["lon"])], radius=14, color=None, fill=True, fill_color="#dc143c", fill_opacity=0.95, tooltip=f"{r['name']}\\n{r['desc']}").add_to(m)
+            folium.Circle(location=[float(r["lat"]), float(r["lon"])], radius=150,
+                          color=None, fill=True, fill_opacity=0.18, fill_color="#ff0000").add_to(m)
+            folium.CircleMarker(location=[float(r["lat"]), float(r["lon"])], radius=16,
+                                color=None, fill=True, fill_color="#ffffff", fill_opacity=1.0).add_to(m)
+            folium.CircleMarker(location=[float(r["lat"]), float(r["lon"])], radius=14,
+                                color=None, fill=True, fill_color="#dc143c", fill_opacity=0.95,
+                                tooltip=f"{r['name']}\n{r['desc']}").add_to(m)
         st_folium(m, width=None, height=520)
         rendered = True
     except Exception:
         pass
+
     if not rendered:
         try:
             import pydeck as pdk
-            halo = pdk.Layer("ScatterplotLayer", data=_df_nodes, get_position='[lon, lat]', get_radius=180, get_fill_color='[255,0,0,46]', pickable=False)
-            white = pdk.Layer("ScatterplotLayer", data=_df_nodes, get_position='[lon, lat]', get_radius=24, get_fill_color='[255,255,255,255]', pickable=False)
-            main = pdk.Layer("ScatterplotLayer", data=_df_nodes, get_position='[lon, lat]', get_radius=20, get_fill_color='[220,20,60,242]', pickable=True)
+            halo = pdk.Layer("ScatterplotLayer", data=_df_nodes, get_position='[lon, lat]',
+                             get_radius=180, get_fill_color='[255,0,0,46]', pickable=False)
+            white = pdk.Layer("ScatterplotLayer", data=_df_nodes, get_position='[lon, lat]',
+                              get_radius=24, get_fill_color='[255,255,255,255]', pickable=False)
+            main = pdk.Layer("ScatterplotLayer", data=_df_nodes, get_position='[lon, lat]',
+                             get_radius=20, get_fill_color='[220,20,60,242]', pickable=True)
             view = pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=12)
-            st.pydeck_chart(pdk.Deck(layers=[halo, white, main], initial_view_state=view, map_style=None, tooltip={"text": "{name}\\n{desc}"}))
+            st.pydeck_chart(pdk.Deck(layers=[halo, white, main], initial_view_state=view,
+                                     map_style=None, tooltip={"text": "{name}\n{desc}"}))
             rendered = True
         except Exception:
             pass
+
     if not rendered:
+        import plotly.graph_objects as go
         fig = go.Figure()
-        fig.add_trace(go.Scatter(x=_df_nodes["lon"], y=_df_nodes["lat"], mode="markers", marker=dict(size=30, color="rgba(255,0,0,0.18)"), hoverinfo="skip", showlegend=False))
-        fig.add_trace(go.Scatter(x=_df_nodes["lon"], y=_df_nodes["lat"], mode="markers", marker=dict(size=22, color="white"), hoverinfo="skip", showlegend=False))
-        fig.add_trace(go.Scatter(x=_df_nodes["lon"], y=_df_nodes["lat"], mode="markers+text", marker=dict(size=18, color="crimson"), text=_df_nodes["name"], textposition="top center", hovertext=_df_nodes["desc"], hoverinfo="text", showlegend=False))
-        fig.update_layout(height=520, margin=dict(l=0, r=0, t=10, b=0), xaxis_title="Longitude", yaxis_title="Latitude")
+        fig.add_trace(go.Scatter(x=_df_nodes["lon"], y=_df_nodes["lat"], mode="markers",
+                                 marker=dict(size=30, color="rgba(255,0,0,0.18)"),
+                                 hoverinfo="skip", showlegend=False))
+        fig.add_trace(go.Scatter(x=_df_nodes["lon"], y=_df_nodes["lat"], mode="markers",
+                                 marker=dict(size=22, color="white"),
+                                 hoverinfo="skip", showlegend=False))
+        fig.add_trace(go.Scatter(x=_df_nodes["lon"], y=_df_nodes["lat"], mode="markers+text",
+                                 marker=dict(size=18, color="crimson"),
+                                 text=_df_nodes["name"], textposition="top center",
+                                 hovertext=_df_nodes["desc"], hoverinfo="text",
+                                 showlegend=False))
+        fig.update_layout(height=520, margin=dict(l=0, r=0, t=10, b=0),
+                          xaxis_title="Longitude", yaxis_title="Latitude")
         st.plotly_chart(fig, use_container_width=True)
 
 # =========================
-# TAB 1 — Detections
+# TAB 1 — Detections (root)
+# =========================
+# =========================
+# TAB 1 — Detections (root)
 # =========================
 with tab1:
+    # 1) Load/prepare root CSVs (Drive or Local) and build date indexes
     status = st.empty()
     with status.container():
         st.markdown('<div class="center-wrap fade-enter"><div>🔎 Checking root CSVs…</div></div>', unsafe_allow_html=True)
+
     cache_epoch = st.session_state.get("DRIVE_EPOCH", "0")
-    if drive_enabled() and (not _is_offline_root()):
+    if drive_enabled():
         bn_meta, kn_meta = list_csvs_drive_root(GDRIVE_FOLDER_ID, cache_epoch=cache_epoch, nocache="stable")
     else:
         bn_meta, kn_meta = [], []
-    force_live = False
+
+    force_live = False  # no live mode; respect cache to avoid thrashing
     if drive_enabled() and (bn_meta or kn_meta):
         status.empty(); status = st.empty()
         with status.container():
@@ -1001,15 +1285,19 @@ with tab1:
         bn_local, kn_local = list_csvs_local(ROOT_LOCAL)
         bn_paths = [Path(p) for p in bn_local]
         kn_paths = [Path(p) for p in kn_local]
+
     status.empty(); status = st.empty()
     with status.container():
         st.markdown('<div class="center-wrap"><div>🧮 Building date index…</div></div>', unsafe_allow_html=True)
 
     bn_by_date = build_date_index(bn_paths, "bn") if bn_paths else {}
     kn_by_date = build_date_index(kn_paths, "kn") if kn_paths else {}
+
     status.empty()
 
-    bn_dates = sorted(bn_by_date.keys()); kn_dates = sorted(kn_by_date.keys())
+    # 2) Controls (reactive)
+    bn_dates = sorted(bn_by_date.keys())
+    kn_dates = sorted(kn_by_date.keys())
     paired_dates = sorted(set(bn_dates).intersection(set(kn_dates)))
 
     src = st.selectbox("Source", ["KōreroNET (kn)", "BirdNET (bn)", "Combined"], index=0, key=k("tab1_src"))
@@ -1021,28 +1309,35 @@ with tab1:
         options, help_txt = bn_dates, "Dates present in any BN file."
     else:
         options, help_txt = kn_dates, "Dates present in any KN file."
+
     if not options:
-        st.warning(f"No available dates for {src}."); st.stop()
+        st.warning(f"No available dates for {src}.")
+        st.stop()
 
     def calendar_pick(available_days: List[date], label: str, help_txt: str = "") -> date:
         available_days = sorted(available_days)
         d_min, d_max = available_days[0], available_days[-1]
+        # Keep the last chosen date if still valid; else default to latest
         default_val = st.session_state.get(k("tab1_day") + "::last", d_max)
         if default_val not in set(available_days):
             default_val = d_max
         d_val = st.date_input(label, value=default_val, min_value=d_min, max_value=d_max, help=help_txt, key=k("tab1_day"))
+        # Snap to nearest earlier available date if user picks an empty day
         if d_val not in set(available_days):
             earlier = [x for x in available_days if x <= d_val]
             if earlier:
-                d_val = earlier[-1]; st.info(f"No data on chosen date; showing {d_val.isoformat()} (nearest earlier).")
+                d_val = earlier[-1]
+                st.info(f"No data on chosen date; showing {d_val.isoformat()} (nearest earlier).")
             else:
                 later = [x for x in available_days if x >= d_val]
-                d_val = later[0]; st.info(f"No data on chosen date; showing {d_val.isoformat()} (nearest later).")
+                d_val = later[0]
+                st.info(f"No data on chosen date; showing {d_val.isoformat()} (nearest later).")
         st.session_state[k("tab1_day") + "::last"] = d_val
         return d_val
 
     d = calendar_pick(options, "Day", help_txt)
 
+    # 3) Helpers
     def load_and_filter(paths: List[Path], kind: str, day_selected: date):
         frames = []
         for p in paths:
@@ -1058,7 +1353,8 @@ with tab1:
     def make_heatmap(df: pd.DataFrame, min_conf: float, title: str):
         df_f = df[pd.to_numeric(df["Confidence"], errors="coerce").astype(float) >= float(min_conf)].copy()
         if df_f.empty:
-            st.warning("No detections after applying the confidence filter."); return
+            st.warning("No detections after applying the confidence filter.")
+            return
         df_f["Hour"] = df_f["ActualTime"].dt.hour
         hour_labels = {h: f"{(h % 12) or 12} {'AM' if h < 12 else 'PM'}" for h in range(24)}
         order = [hour_labels[h] for h in range(24)]
@@ -1069,13 +1365,17 @@ with tab1:
         pivot = pivot[order]
         totals = pivot.sum(axis=1)
         pivot = pivot.loc[totals.sort_values(ascending=False).index]
-        fig = px.imshow(pivot.values, x=pivot.columns, y=pivot.index, color_continuous_scale="RdYlBu_r",
-                        labels=dict(x="Hour (AM/PM)", y="Species (label)", color="Detections"),
-                        text_auto=True, aspect="auto", title=title)
+        fig = px.imshow(
+            pivot.values, x=pivot.columns, y=pivot.index,
+            color_continuous_scale="RdYlBu_r",
+            labels=dict(x="Hour (AM/PM)", y="Species (label)", color="Detections"),
+            text_auto=True, aspect="auto", title=title,
+        )
         fig.update_layout(margin=dict(l=10,r=10,t=50,b=10))
         fig.update_xaxes(type="category")
         st.plotly_chart(fig, use_container_width=True)
 
+    # 4) Reactive render (no button)
     with st.spinner("Rendering heatmap…"):
         if src == "BirdNET (bn)":
             df = load_and_filter(bn_by_date.get(d, []), "bn", d)
@@ -1091,9 +1391,12 @@ with tab1:
 # ================================
 # TAB 2 — Verify (snapshot date)
 # ================================
+# ================================
+# TAB 2 — Verify (snapshot date)
+# ================================
 with tab_verify:
     if not drive_enabled():
-        st.error("Google Drive is not configured or disabled."); st.stop()
+        st.error("Google Drive is not configured in secrets."); st.stop()
 
     center2 = st.empty()
     with center2.container():
@@ -1107,8 +1410,10 @@ with tab_verify:
         st.warning(f"Could not index masters (non-fatal): {e!s}")
 
     center2.empty()
+
     if master.empty or master.shape[0] == 0:
-        st.warning("No master CSVs found in any snapshot."); st.stop()
+        st.warning("No master CSVs found in any snapshot.")
+        st.stop()
 
     colA, colB = st.columns([2,1])
     with colA:
@@ -1116,6 +1421,7 @@ with tab_verify:
     with colB:
         min_conf_v = st.slider("Min confidence", 0.0, 1.0, 0.90, 0.01, key=k("tab2_min_conf"))
 
+    # Filter pool safely
     try:
         if src_mode_v == "KōreroNET (KN)":
             pool = master[master["Kind"] == "KN"]
@@ -1129,8 +1435,10 @@ with tab_verify:
         st.warning(f"Filter error (non-fatal): {e!s}")
 
     if pool.empty:
-        st.info("No rows above the selected confidence."); st.stop()
+        st.info("No rows above the selected confidence.")
+        st.stop()
 
+    # Day picker
     try:
         avail_days = sorted(pool["Date"].unique())
     except Exception:
@@ -1140,30 +1448,45 @@ with tab_verify:
 
     day_default = avail_days[-1]
     day_pick = st.date_input("Day", value=day_default, min_value=avail_days[0], max_value=avail_days[-1], key=k("tab2_day"))
+
     day_df = pool[pool["Date"] == day_pick]
     if day_df.empty:
-        st.warning("No detections for the chosen date."); st.stop()
+        st.warning("No detections for the chosen date.")
+        st.stop()
 
+    # Species list with counts (stable)
     counts = day_df.groupby("Label").size().sort_values(ascending=False)
     species_list = list(counts.index)
+
+    # Keep/repair selection index across changes
     sel_key = f"verify_species_sel::{day_pick.isoformat()}::{src_mode_v}"
     prev_species = st.session_state.get(sel_key, None)
     if prev_species not in species_list:
-        prev_species = species_list[0]; st.session_state[sel_key] = prev_species
-    species = st.selectbox("Species", options=species_list, index=species_list.index(prev_species),
-                           format_func=lambda s: f"{s} — {counts[s]} detections", key=f"verify_species::{day_pick.isoformat()}::{src_mode_v}")
+        prev_species = species_list[0]
+        st.session_state[sel_key] = prev_species
+
+    species = st.selectbox(
+        "Species",
+        options=species_list,
+        index=species_list.index(prev_species),
+        format_func=lambda s: f"{s} — {counts[s]} detections",
+        key=f"verify_species::{day_pick.isoformat()}::{src_mode_v}",
+    )
     st.session_state[sel_key] = species
 
+    # Build playlist, reset index if list changed
     playlist = day_df[day_df["Label"] == species].sort_values(["Kind","ChunkName"]).reset_index(drop=True)
+
     pkey = f"v2_playlist_sig::{day_pick.isoformat()}::{src_mode_v}::{species}"
     sig = (len(playlist), tuple(playlist["ChunkName"].head(3)))
     if st.session_state.get(pkey) != sig:
         st.session_state[pkey] = sig
         st.session_state[f"v2_idx::{pkey}"] = 0
+
     idx_key = f"v2_idx::{pkey}"
     idx = int(st.session_state.get(idx_key, 0)) % max(1, len(playlist))
 
-    col1, col2, col3, _ = st.columns([1,1,1,6])
+    col1, col2, col3, col4 = st.columns([1,1,1,6])
     autoplay = False
     with col1:
         if st.button("⏮ Prev", key=k("tab2_prev")):
@@ -1186,6 +1509,7 @@ with tab_verify:
         conf_val = float('nan')
     st.markdown(f"**Date:** {row['Date']}  |  **Chunk:** `{row['ChunkName']}`  |  **Kind:** {row['Kind']}  |  **Confidence:** {conf_val:.3f}" if pd.notna(conf_val) else f"**Date:** {row['Date']}  |  **Chunk:** `{row['ChunkName']}`  |  **Kind:** {row['Kind']}")
 
+    # Safe audio fetch with retry
     @_retry()
     def _safe_chunk_cached(chunk_name: str, folder_id: str, subdir: str) -> Optional[Path]:
         return ensure_chunk_cached(chunk_name, folder_id, subdir=subdir, force=False)
@@ -1203,14 +1527,18 @@ with tab_verify:
             if not cached or not cached.exists():
                 st.warning("Audio chunk not found in Drive folder."); return
             try:
-                if cached.stat().st_size > 30 * 1024 * 1024:
-                    st.warning("Audio file too large to preview safely."); return
+                # Guard against reading giant files into memory
+                if cached.stat().st_size > 30 * 1024 * 1024:  # 30 MB sanity cap
+                    st.warning("Audio file too large to preview safely.")
+                    return
                 with open(cached, "rb") as f:
                     data = f.read()
             except MemoryError:
-                st.warning("Not enough memory to load audio preview."); return
+                st.warning("Not enough memory to load audio preview.")
+                return
             except Exception as e:
-                st.warning(f"Cannot open audio chunk: {e!s}"); return
+                st.warning(f"Cannot open audio chunk: {e!s}")
+                return
 
             if auto:
                 import base64
@@ -1219,9 +1547,11 @@ with tab_verify:
             else:
                 st.audio(data, format="audio/wav")
         except Exception as e:
+            # Final catch-all so UI never crashes
             st.warning(f"Playback error (non-fatal): {e!s}")
 
     _play_audio(row, autoplay)
+
 
 # =====================
 # TAB 3 — Power graph
@@ -1229,10 +1559,10 @@ with tab_verify:
 with tab3:
     st.subheader("Node Power History")
     if not drive_enabled():
-        st.error("Google Drive is not configured or disabled."); st.stop()
+        st.error("Google Drive is not configured in secrets."); st.stop()
 
     def find_subfolder_by_name(root_id: str, name_ci: str) -> Optional[Dict[str, Any]]:
-        kids = _folder_children_cached(root_id)
+        kids = list_children(root_id, max_items=2000)
         for k in kids:
             if k.get("mimeType")=="application/vnd.google-apps.folder" and k.get("name","").lower()==name_ci.lower():
                 return k
@@ -1243,11 +1573,11 @@ with tab3:
         st.warning("Could not find 'Power logs' folder under the Drive root.")
         st.stop()
 
-    LOG_RE = re.compile(r"^power_history_(\\d{8})_(\\d{6})\\.log$", re.IGNORECASE)
+    LOG_RE = re.compile(r"^power_history_(\d{8})_(\d{6})\.log$", re.IGNORECASE)
 
     @st.cache_data(show_spinner=True)
     def list_power_logs(folder_id: str, cache_epoch: str, nocache: str = "stable") -> List[Dict[str, Any]]:
-        kids = _folder_children_cached(folder_id)
+        kids = list_children(folder_id, max_items=2000)
         files = [k for k in kids if k.get("mimeType") != "application/vnd.google-apps.folder" and LOG_RE.match(k.get("name",""))]
         files.sort(key=lambda m: m.get("name",""), reverse=True)
         return files
@@ -1284,7 +1614,7 @@ with tab3:
         except Exception:
             head_dt = None
             for l in lines[:3]:
-                m = re.search(r"\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}", l)
+                m = re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", l)
                 if m:
                     try:
                         head_dt = datetime.strptime(m.group(0), "%Y-%m-%d %H:%M:%S")
@@ -1319,7 +1649,12 @@ with tab3:
         df = pd.DataFrame({"t": times, "PH_WH": WH, "PH_mAh": mAh, "PH_SoCi": SoCi, "PH_SoCv": SoCv})
 
         eps = 1e-9
-        all_zero_mask = ((np.abs(df["PH_WH"])<eps) & (np.abs(df["PH_mAh"])<eps) & (np.abs(df["PH_SoCi"])<eps) & (np.abs(df["PH_SoCv"])<eps))
+        all_zero_mask = (
+            (np.abs(df["PH_WH"])   < eps) &
+            (np.abs(df["PH_mAh"])  < eps) &
+            (np.abs(df["PH_SoCi"]) < eps) &
+            (np.abs(df["PH_SoCv"]) < eps)
+        )
         df = df.loc[~all_zero_mask].reset_index(drop=True)
         return df
 
@@ -1327,107 +1662,128 @@ with tab3:
     if st.button("Show results", type="primary", key=k("tab3_show_btn")):
         with st.spinner("Building power time-series (last 7 days)…"):
             files = list_power_logs(logs_folder["id"], cache_epoch=cache_epoch)
+
             window_days = 7
             cutoff = datetime.now() - timedelta(days=window_days)
+
             frames: List[pd.DataFrame] = []
             for meta in files:
                 local = ensure_log_cached(meta, force=False)
                 df = parse_power_log(local)
-                if df is None or df.empty: continue
+                if df is None or df.empty:
+                    continue
                 df = df[df["t"] >= cutoff]
-                if df.empty: break
+                if df.empty:
+                    break
                 frames.append(df)
-            ts = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=["t","PH_WH","PH_mAh","PH_SoCi","PH_SoCv"])
+
+            ts = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(
+                columns=["t","PH_WH","PH_mAh","PH_SoCi","PH_SoCv"]
+            )
 
         if ts.empty:
             st.warning("No parsable power logs in the last 7 days.")
         else:
             ts = ts.drop_duplicates(subset=["t"]).sort_values("t").reset_index(drop=True)
+
             fig = go.Figure()
             fig.add_trace(go.Scatter(x=ts["t"], y=ts["PH_SoCi"], mode="lines", name="SoC_i (%)", yaxis="y1"))
             fig.add_trace(go.Scatter(x=ts["t"], y=ts["PH_WH"],  mode="lines", name="Energy (Wh)", yaxis="y2"))
-            fig.update_layout(title="Power / State of Charge (last 7 days)", xaxis=dict(title="Time"),
-                              yaxis=dict(title="SoC (%)", range=[0, 100]), yaxis2=dict(title="Wh", overlaying="y", side="right"),
-                              legend=dict(orientation="h"), margin=dict(l=10, r=10, t=50, b=10))
+            fig.update_layout(
+                title="Power / State of Charge (last 7 days)",
+                xaxis=dict(title="Time"),
+                yaxis=dict(title="SoC (%)", range=[0, 100]),
+                yaxis2=dict(title="Wh", overlaying="y", side="right"),
+                legend=dict(orientation="h"),
+                margin=dict(l=10, r=10, t=50, b=10),
+            )
             st.plotly_chart(fig, use_container_width=True)
+
             stitched_days = max(1, (ts["t"].max() - ts["t"].min()).days + 1)
             st.caption(f"Showing last {min(stitched_days, 7)} day(s): {ts['t'].min().date()} → {ts['t'].max().date()} · {len(ts)} points")
+
             last = ts.iloc[-1]
             c1, c2 = st.columns(2)
             with c1: st.metric("Last SoC_i (%)", f"{last['PH_SoCi']:.1f}")
             with c2: st.metric("Last Energy (Wh)", f"{last['PH_WH']:.2f}")
-
 # ================================
 # TAB 4 — GUI autostart log tail
 # ================================
 with tab4:
     st.subheader("GUI Autostart — latest log (tail 500)")
     if not drive_enabled():
-        st.error("Google Drive is not configured or disabled."); st.stop()
+        st.error("Google Drive is not configured in secrets."); st.stop()
 
-    def find_subfolder_by_name(root_id: str, name_ci: str) -> Optional[Dict[str, Any]]:
-        kids = _folder_children_cached(root_id)
-        for k in kids:
-            if k.get("mimeType")=="application/vnd.google-apps.folder" and k.get("name","").lower()==name_ci.lower():
-                return k
-        return None
-
+    # Locate: From the node / Power logs / raw
+    # (Your Drive root is the GDRIVE_FOLDER_ID; “From the node” is already your root clone)
     power_folder = find_subfolder_by_name(GDRIVE_FOLDER_ID, "Power logs")
     if not power_folder:
-        st.warning("Could not find 'Power logs' under the Drive root."); st.stop()
+        st.warning("Could not find 'Power logs' under the Drive root.")
+        st.stop()
+
     raw_folder = find_subfolder_by_name(power_folder["id"], "raw")
     if not raw_folder:
-        st.warning("Could not find 'raw' inside 'Power logs'."); st.stop()
+        st.warning("Could not find 'raw' inside 'Power logs'.")
+        st.stop()
 
     cache_epoch = st.session_state.get("DRIVE_EPOCH", "0")
-
-    @st.cache_data(show_spinner=False)
-    def list_autostart_logs(raw_folder_id: str, cache_epoch: str, nocache: str = "stable") -> List[Dict[str, Any]]:
-        kids = _folder_children_cached(raw_folder_id)
-        files = [k for k in kids if k.get("mimeType") != "application/vnd.google-apps.folder" and LOG_AUTOSTART_RE.match(k.get("name",""))]
-        files.sort(key=lambda m: (m.get("name",""), m.get("modifiedTime","")), reverse=True)
-        return files
-
-    @st.cache_data(show_spinner=False)
-    def ensure_raw_cached(meta: Dict[str, Any], force: bool = False) -> Path:
-        local_path = POWER_CACHE / meta["name"]
-        return download_to(local_path, meta["id"], force=force)
-
     files = list_autostart_logs(raw_folder["id"], cache_epoch=cache_epoch)
-    colA, _ = st.columns([1,3])
+
+    colA, colB = st.columns([1,3])
     with colA:
-        if st.button("🔄 Refresh", key=k("tab4_refresh")):
-            st.cache_data.clear(); st.rerun()
+        do_refresh = st.button("🔄 Refresh", key=k("tab4_refresh"))
+    if do_refresh:
+        # force cache bust by clearing and re-running
+        st.cache_data.clear()
+        st.rerun()
 
     if not files:
-        st.info("No files matching `*__gui_autostart.log` were found in Power logs/raw."); st.stop()
+        st.info("No files matching `*__gui_autostart.log` were found in Power logs/raw.")
+        st.stop()
 
-    latest = files[0]
+    latest = files[0]  # already newest first
     local = ensure_raw_cached(latest, force=False)
 
+    # Tail last 500 lines efficiently (avoid loading huge logs)
     def tail_lines(path: Path, max_lines: int = 500, block_size: int = 8192) -> List[str]:
         try:
             with open(path, "rb") as f:
-                f.seek(0, os.SEEK_END); end = f.tell()
-                lines: List[bytes] = []; buf = b""
+                f.seek(0, os.SEEK_END)
+                end = f.tell()
+                lines: List[bytes] = []
+                buf = b""
                 while end > 0 and len(lines) <= max_lines:
                     read_size = min(block_size, end)
-                    end -= read_size; f.seek(end, os.SEEK_SET)
-                    chunk = f.read(read_size); buf = chunk + buf
-                    parts = buf.split(b"\\n"); buf = parts[0]; lines_chunk = parts[1:]; lines = lines_chunk + lines
-                text_lines = b"\\n".join(lines).decode("utf-8", errors="replace").splitlines()
+                    end -= read_size
+                    f.seek(end, os.SEEK_SET)
+                    chunk = f.read(read_size)
+                    buf = chunk + buf
+                    parts = buf.split(b"\n")
+                    # keep the first partial; count full lines from the end
+                    buf = parts[0]
+                    lines_chunk = parts[1:]
+                    lines = lines_chunk + lines
+                # Convert to text and take the tail
+                text_lines = b"\n".join(lines).decode("utf-8", errors="replace").splitlines()
                 return text_lines[-max_lines:]
         except Exception as e:
             return [f"[tail error] {e!s}"]
 
     lines = tail_lines(local, max_lines=500)
     lines = list(reversed(lines))  # newest first
-    numbered = "\\n".join(f"{i+1:>4}  {line}" for i, line in enumerate(lines))
+    numbered = "\n".join(f"{i+1:>4}  {line}" for i, line in enumerate(lines))
     st.code(numbered, language="log")
 
+
+    # Header info + download
     fn = latest.get("name","(unknown)")
+    st.caption(f"Showing last 500 lines of: `{fn}`")
     try:
         with open(local, "rb") as _fh:
             st.download_button("Download full log", _fh, file_name=fn, mime="text/plain", key=k("dl_gui_log"))
     except Exception:
         pass
+
+    # Display with line numbers
+    numbered = "\n".join(f"{i+1:>4}  {line}" for i, line in enumerate(lines))
+    st.code(numbered, language="log")
