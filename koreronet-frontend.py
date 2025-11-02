@@ -349,6 +349,13 @@ def list_children(folder_id: str, max_items: int = 2000) -> List[Dict[str, Any]]
         token = resp.get("nextPageToken")
         if not token: break
     return items
+    
+def find_subfolder_by_name(root_id: str, name_ci: str) -> Optional[Dict[str, Any]]:
+    kids = list_children(root_id, max_items=2000)
+    for k in kids:
+        if k.get("mimeType") == "application/vnd.google-apps.folder" and k.get("name","").lower() == name_ci.lower():
+            return k
+    return None
 
 @_retry()
 def download_to(path: Path, file_id: str, force: bool = False) -> Path:
@@ -1003,7 +1010,7 @@ if OFFLINE_DEPLOY:
 # ============================================================================
 # ------- NEW: Welcome overlay (latest detections top-3 sentence) -----------
 # ============================================================================
-
+# ------- NEW: Welcome overlay (latest detections top-3 sentence) -----------
 def _human_day(d: date) -> str:
     today = datetime.now().date()
     if d == today: return "Today"
@@ -1011,7 +1018,6 @@ def _human_day(d: date) -> str:
     return d.strftime("%A, %d %b %Y")
 
 def _safe_plural(n: int, noun: str) -> str:
-    # “53 Tui”, “1 Tui” — most NZ bird common names are invariant in plural here.
     return f"{n:,} {noun}"
 
 def _join_top(items: List[Tuple[str, int]]) -> str:
@@ -1024,146 +1030,106 @@ def _join_top(items: List[Tuple[str, int]]) -> str:
 
 @st.cache_data(show_spinner=False)
 def _latest_root_summary(root_id_or_path: str, live: bool) -> Tuple[Optional[str], Optional[date], pd.DataFrame]:
-    """Returns (mode_label, chosen_date, merged_df_for_that_day)."""
     cache_epoch = st.session_state.get("DRIVE_EPOCH", "0")
-    # Get metadata/paths for root CSVs
     if drive_enabled():
         bn_meta, kn_meta = list_csvs_drive_root(root_id_or_path, cache_epoch=cache_epoch)
-        if bn_meta or kn_meta:
-            bn_paths = [ensure_csv_cached(m, subdir="root/bn", cache_epoch=cache_epoch, force=live) for m in bn_meta]
-            kn_paths = [ensure_csv_cached(m, subdir="root/kn", cache_epoch=cache_epoch, force=live) for m in kn_meta]
-        else:
-            bn_paths, kn_paths = [], []
+        bn_paths = [ensure_csv_cached(m, subdir="root/bn", cache_epoch=cache_epoch, force=live) for m in bn_meta]
+        kn_paths = [ensure_csv_cached(m, subdir="root/kn", cache_epoch=cache_epoch, force=live) for m in kn_meta]
     else:
         bn_local, kn_local = list_csvs_local(ROOT_LOCAL)
         bn_paths = [Path(p) for p in bn_local]
         kn_paths = [Path(p) for p in kn_local]
 
-    # Build date indices
     bn_by_date = build_date_index(bn_paths, "bn") if bn_paths else {}
     kn_by_date = build_date_index(kn_paths, "kn") if kn_paths else {}
-
     if not bn_by_date and not kn_by_date:
         return None, None, pd.DataFrame()
 
-    bn_dates = set(bn_by_date.keys())
-    kn_dates = set(kn_by_date.keys())
-    both     = sorted(bn_dates & kn_dates)
-    either   = sorted(bn_dates | kn_dates)
+    bn_dates, kn_dates = set(bn_by_date), set(kn_by_date)
+    both, either = sorted(bn_dates & kn_dates), sorted(bn_dates | kn_dates)
+    chosen = both[-1] if both else either[-1]
+    mode_label = "Combined" if both else ("BirdNET (bn)" if chosen in bn_dates else "KōreroNET (kn)")
 
-    # Prefer a date where BOTH exist, else latest of either
-    if both:
-        chosen = both[-1]
-        mode_label = "Combined"
-    else:
-        chosen = either[-1]
-        # describe which one it is
-        mode_label = "BirdNET (bn)" if chosen in bn_dates else "KōreroNET (kn)"
-
-    # Load/standardize filtered by chosen date
-    def _load_and_filter(paths: List[Path], kind: str, day_selected: date):
+    def _load_day(paths: List[Path], kind: str, dsel: date):
         frames = []
         for p in paths:
             try:
-                raw = load_csv(p)
-                std = standardize_root_df(raw, kind)
-                std = std[std["ActualTime"].dt.date == day_selected]
-                if not std.empty: frames.append(std)
+                raw = load_csv(p); std = standardize_root_df(raw, kind)
+                frames.append(std[std["ActualTime"].dt.date == dsel])
             except Exception:
                 pass
         return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
-    df_bn = _load_and_filter(bn_by_date.get(chosen, []), "bn", chosen) if chosen in bn_by_date else pd.DataFrame()
-    df_kn = _load_and_filter(kn_by_date.get(chosen, []), "kn", chosen) if chosen in kn_by_date else pd.DataFrame()
+    df_bn = _load_day(bn_by_date.get(chosen, []), "bn", chosen) if chosen in bn_by_date else pd.DataFrame()
+    df_kn = _load_day(kn_by_date.get(chosen, []), "kn", chosen) if chosen in kn_by_date else pd.DataFrame()
     merged = pd.concat([df_bn, df_kn], ignore_index=True) if not df_bn.empty or not df_kn.empty else (df_bn if not df_bn.empty else df_kn)
-
     return mode_label, chosen, merged
 
-# Show the overlay once per session (after splash, before tabs)
-with auto_restart("Welcome overlay"):
-    _render_welcome_overlay()
+# Gate: show once per session
+if not st.session_state.get("__welcome_done__", False):
+    with auto_restart("Welcome overlay"):
+        with st.spinner("Summarising latest detections…"):
+            mode, chosen_date, df = _latest_root_summary(GDRIVE_FOLDER_ID, False)
 
-    # Only show once per session unless user refreshes cache
-    if st.session_state.get("__welcome_done__", False):
-        return
-    with st.spinner("Summarising latest detections…"):
-        mode, chosen_date, df = _latest_root_summary(GDRIVE_FOLDER_ID, False)
-    # Soft gate: show overlay, skip rendering tabs until user continues
-    overlay = st.empty()
-    with overlay.container():
-        # Start of overlay card
-        st.markdown('<div class="overlay-card">', unsafe_allow_html=True)
-        # Heading for the overlay: include both technology and summary sections
-        st.markdown('<div class="overlay-title">KōreroNET</div>', unsafe_allow_html=True)
-        
-        # ------------------------------------------------------------------
-        # Technology highlights
-        # ------------------------------------------------------------------
-        # Introduce a subheading for our technology showcase
-        st.markdown('<div class="overlay-sub">Our Technology Highlights</div>', unsafe_allow_html=True)
-        # Define a set of features (icon, description). Icons use emoji for
-        # broad browser support without external assets. Feel free to tweak or
-        # extend this list – these represent the core capabilities of the
-        # bioacoustic monitoring platform.
-        features: List[Tuple[str, str]] = [
-            ('🔊', 'Bioacoustic monitoring of all vocal species in New Zealand wildlife.'),
-            ('🎧', 'Full-spectrum recording: ultrasonic and audible ranges.'),
-            ('🤖', 'Autonomous detection powered by our in‑house AI models.'),
-            ('🎛️', 'On‑device edge computing and recording in a single package.'),
-            ('📡', 'Deployable in remote areas with flexible connectivity.'),
-            ('📶', 'Supports LoRaWAN, Wi‑Fi and LTE networking.'),
-            ('☀️', 'Solar‑powered and weather‑sealed for harsh environments.'),
-            ('⚡', 'Energy‑efficient: records and processes in intervals to save power.'),
-            ('🐦', 'Detects both pests and birds of interest.'),
-            ('📁', 'Provides accessible recordings of species of interest.')
-        ]
-        # Build the HTML for the grid of feature cards
-        feature_html = '<div class="features-grid">'
-        for icon, text in features:
-            feature_html += f'<div class="feature-card"><div class="feature-icon">{icon}</div><div class="feature-text">{text}</div></div>'
-        feature_html += '</div>'
-        st.markdown(feature_html, unsafe_allow_html=True)
-        
-        # Separator before the summary section
-        st.markdown('<hr style="border:0; border-top:1px solid #444; margin:1.5rem 0; opacity:0.4;">', unsafe_allow_html=True)
-        
-        # ------------------------------------------------------------------
-        # Latest field summary
-        # ------------------------------------------------------------------
-        st.markdown('<div class="overlay-sub">Latest Field Summary</div>', unsafe_allow_html=True)
-        if df is None or df.empty or chosen_date is None:
-            st.markdown('<div class="overlay-sub">No parsable detections found in the most recent root CSVs.</div>', unsafe_allow_html=True)
-        else:
-            # Count per Label (no confidence filter here; this is a raw snapshot)
-            counts = df["Label"].astype(str).value_counts()
-            top = [(lbl, int(counts[lbl])) for lbl in counts.index[:3]]
-            nice_day = _human_day(chosen_date)
-            sentence = f"{nice_day} we detected {_join_top(top)}."
-            st.markdown(f'<div class="overlay-sub">{sentence}</div>', unsafe_allow_html=True)
-            # Tiny “pills” for context
-            total = int(counts.sum())
-            uniq  = int(counts.shape[0])
-            st.markdown(f"""
-                <div class="overlay-pill">Mode: {mode or '—'}</div>
-                <div class="overlay-pill">Date: {chosen_date.isoformat() if chosen_date else '—'}</div>
-                <div class="overlay-pill">Detections: {total:,}</div>
-                <div class="overlay-pill">Species: {uniq:,}</div>
-            """, unsafe_allow_html=True)
-        
-        # Action row with continue button
-        c1, c2 = st.columns([1,5])
-        with c1:
-            if st.button("Continue →", type="primary", key=k("welcome_continue")):
-                st.session_state["__welcome_done__"] = True
-                st.rerun()
+        card = st.empty()
+        with card.container():
+            st.markdown('<div class="overlay-card">', unsafe_allow_html=True)
+            st.markdown('<div class="overlay-title">KōreroNET</div>', unsafe_allow_html=True)
 
-        # Close overlay-card wrapper
-        st.markdown('</div>', unsafe_allow_html=True)
-    # Block tabs on first paint
+            # Technology highlights (your Hark-inspired grid)
+            st.markdown('<div class="overlay-sub">Our Technology Highlights</div>', unsafe_allow_html=True)
+            features: List[Tuple[str, str]] = [
+                ('🔊', 'Bioacoustic monitoring of all vocal species in New Zealand wildlife.'),
+                ('🎧', 'Full-spectrum recording: ultrasonic and audible ranges.'),
+                ('🤖', 'Autonomous detection powered by our in-house AI models.'),
+                ('🎛️', 'On-device edge computing and recording in a single package.'),
+                ('📡', 'Deployable in remote areas with flexible connectivity.'),
+                ('📶', 'Supports LoRaWAN, Wi-Fi and LTE networking.'),
+                ('☀️', 'Solar-powered and weather-sealed for harsh environments.'),
+                ('⚡', 'Energy-efficient: records and processes in intervals to save power.'),
+                ('🐦', 'Detects both pests and birds of interest.'),
+                ('📁', 'Provides accessible recordings of species of interest.')
+            ]
+            grid = '<div class="features-grid">' + "".join(
+                f'<div class="feature-card"><div class="feature-icon">{i}</div><div class="feature-text">{t}</div></div>'
+                for i, t in features
+            ) + '</div>'
+            st.markdown(grid, unsafe_allow_html=True)
+
+            st.markdown('<hr style="border:0; border-top:1px solid #444; margin:1.5rem 0; opacity:0.4;">', unsafe_allow_html=True)
+
+            # Latest field summary
+            st.markdown('<div class="overlay-sub">Latest Field Summary</div>', unsafe_allow_html=True)
+            if df is None or df.empty or chosen_date is None:
+                st.markdown('<div class="overlay-sub">No parsable detections found in the most recent root CSVs.</div>', unsafe_allow_html=True)
+            else:
+                counts = df["Label"].astype(str).value_counts()
+                top = [(lbl, int(counts[lbl])) for lbl in counts.index[:3]]
+                sentence = f"{_human_day(chosen_date)} we detected {_join_top(top)}."
+                st.markdown(f'<div class="overlay-sub">{sentence}</div>', unsafe_allow_html=True)
+                total, uniq = int(counts.sum()), int(counts.shape[0])
+                st.markdown(
+                    f'<div class="overlay-pill">Mode: {mode or "—"}</div>'
+                    f'<div class="overlay-pill">Date: {chosen_date.isoformat()}</div>'
+                    f'<div class="overlay-pill">Detections: {total:,}</div>'
+                    f'<div class="overlay-pill">Species: {uniq:,}</div>',
+                    unsafe_allow_html=True,
+                )
+
+            c1, _ = st.columns([1,5])
+            with c1:
+                if st.button("Continue →", type="primary", key=k("welcome_continue")):
+                    st.session_state["__welcome_done__"] = True
+                    st.rerun()
+
+            st.markdown('</div>', unsafe_allow_html=True)
+
+    # Prevent tabs from rendering until user clicks Continue
     st.stop()
 
+
 # Show the overlay once per session (after splash, before tabs)
-_render_welcome_overlay()
+
 @st.cache_data(show_spinner=False)
 def list_autostart_logs(raw_folder_id: str, cache_epoch: str, nocache: str = "stable") -> List[Dict[str, Any]]:
     """Return files under /Power logs/raw matching *__gui_autostart.log, newest first."""
