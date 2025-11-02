@@ -330,6 +330,14 @@ def list_children(folder_id: str, max_items: int = 2000) -> List[Dict[str, Any]]
         if not token: break
     return items
 
+
+# --- SAFETY PATCH: safe wrapper for listing Drive folder children ---
+def list_children_safe(folder_id: str, max_items: int = 2000):
+    try:
+        return list_children_safe(folder_id, max_items=max_items)
+    except Exception:
+        # Never raise to the UI; degrade to empty listing
+        return []
 @_retry()
 def download_to(path: Path, file_id: str, force: bool = False) -> Path:
     drive = get_drive_client()
@@ -345,6 +353,58 @@ def download_to(path: Path, file_id: str, force: bool = False) -> Path:
             _, done = downloader.next_chunk()
     return path
 
+# --- SAFETY PATCH: robust Drive downloader (non-fatal on errors) ---
+_orig_download_to = download_to
+def download_to(path: Path, file_id: str, force: bool = False) -> Path:
+    """Wrapper around the Google Drive download that never raises to the UI.
+    - Adds a very lightweight file lock to avoid concurrent writes to the same path.
+    - Removes any partial file on failure.
+    - Returns the target path (may not exist) instead of raising exceptions.
+    """
+    # soft lock beside the target file
+    lock = Path(str(path) + ".lock")
+    try:
+        waited = 0.0
+        # wait up to ~10s if someone else is downloading the same file
+        while lock.exists() and waited < 10.0:
+            time.sleep(0.2)
+            waited += 0.2
+        try:
+            lock.touch(exist_ok=False)
+        except Exception:
+            pass
+
+        if (not force) and path.exists():
+            return path
+
+        try:
+            return _orig_download_to(path, file_id, force=force)
+        except Exception as e:
+            # Best-effort cleanup of any partial writes
+            try:
+                if path.exists():
+                    try:
+                        # if it's very small (<1 KiB) it's probably partial
+                        if path.stat().st_size < 1024:
+                            path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            # Never surface as a crash; UI will treat as missing file gracefully
+            try:
+                import streamlit as st
+                st.warning(f"Drive download failed (non-fatal): {e!s}")
+            except Exception:
+                pass
+            return path  # may not exist; callers should handle
+    finally:
+        try:
+            if lock.exists():
+                lock.unlink()
+        except Exception:
+            pass
+
 @st.cache_data(ttl=180, show_spinner=False)
 @_retry()
 def _compute_drive_epoch(root_id: str, nocache: str = "stable") -> str:
@@ -355,7 +415,7 @@ def _compute_drive_epoch(root_id: str, nocache: str = "stable") -> str:
     def _max_mtime(kids: List[Dict[str, Any]]) -> str:
         if not kids: return ""
         return max((k.get("modifiedTime","") for k in kids), default="")
-    root_kids = list_children(root_id, max_items=2000)
+    root_kids = list_children_safe(root_id, max_items=2000)
     root_max  = _max_mtime(root_kids)
     bkid = None
     for k in root_kids:
@@ -364,7 +424,7 @@ def _compute_drive_epoch(root_id: str, nocache: str = "stable") -> str:
             break
     back_max = ""
     if bkid:
-        back_kids = list_children(bkid, max_items=2000)
+        back_kids = list_children_safe(bkid, max_items=2000)
         back_max  = _max_mtime(back_kids)
     token = "|".join([root_max, back_max])
     return token or time.strftime("%Y%m%d%H%M%S")
@@ -392,7 +452,7 @@ def _folder_children_cached(folder_id: str) -> List[Dict[str, Any]]:
     epoch = st.session_state.get("DRIVE_EPOCH", "0")
     key = f"drive_kids::{epoch}::{folder_id}"
     if key not in st.session_state:
-        st.session_state[key] = list_children(folder_id, max_items=2000)
+        st.session_state[key] = (list_children_safe(folder_id, max_items=2000) or [])
     return st.session_state[key]
 
 
@@ -480,7 +540,7 @@ def list_csvs_local(root: str) -> Tuple[List[str], List[str]]:
 
 @st.cache_data(show_spinner=False)
 def list_csvs_drive_root(folder_id: str, cache_epoch: str, nocache: str = "stable") -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    kids = list_children(folder_id, max_items=2000)
+    kids = list_children_safe(folder_id, max_items=2000)
     bn, kn = [], []
     for k in kids:
         n = k.get("name","")
@@ -578,27 +638,27 @@ def _parse_date_from_snapname(name: str) -> Optional[date]:
         return None
 
 def _find_backup_folder(root_folder_id: str) -> Optional[Dict[str, Any]]:
-    kids = list_children(root_folder_id, max_items=2000)
+    kids = list_children_safe(root_folder_id, max_items=2000)
     for k in kids:
         if k.get("mimeType") == "application/vnd.google-apps.folder" and k.get("name","").lower() == "backup":
             return k
     return None
 
 def _find_chunk_dirs(snapshot_id: str) -> Dict[str, str]:
-    kids = list_children(snapshot_id, max_items=2000)
+    kids = list_children_safe(snapshot_id, max_items=2000)
     kn = [k for k in kids if k.get("mimeType")=="application/vnd.google-apps.folder" and "koreronet" in k.get("name","").lower()]
     bn = [k for k in kids if k.get("mimeType")=="application/vnd.google-apps.folder" and "birdnet"   in k.get("name","").lower()]
     return {"KN": (kn[0]["id"] if kn else snapshot_id), "BN": (bn[0]["id"] if bn else snapshot_id)}
 
 def _find_named_in_snapshot(snapshot_id: str, exact_name: str) -> Optional[Dict[str, Any]]:
-    kids = list_children(snapshot_id, max_items=2000)
+    kids = list_children_safe(snapshot_id, max_items=2000)
     files_only = [f for f in kids if f.get("mimeType") != "application/vnd.google-apps.folder"]
     for f in files_only:
         if f.get("name","").lower() == exact_name.lower():
             return f
     subfolders = [f for f in kids if f.get("mimeType") == "application/vnd.google-apps.folder"]
     for sf in subfolders:
-        sub_files = list_children(sf["id"], max_items=2000)
+        sub_files = list_children_safe(sf["id"], max_items=2000)
         for f in sub_files:
             if f.get("mimeType") != "application/vnd.google-apps.folder" and f.get("name","").lower() == exact_name.lower():
                 return f
@@ -620,7 +680,7 @@ def build_master_index_by_snapshot_date(root_folder_id: str, cache_epoch: str, n
             "ChunkDriveFolderId","SnapId","SnapName"
         ])
 
-    snaps = [k for k in list_children(backup["id"], max_items=2000)
+    snaps = [k for k in list_children_safe(backup["id"], max_items=2000)
              if k.get("mimeType")=="application/vnd.google-apps.folder" and SNAP_RE.match(k.get("name",""))]
     snaps.sort(key=lambda m: m.get("name",""), reverse=True)
 
@@ -668,13 +728,13 @@ def build_master_index_by_snapshot_date(root_folder_id: str, cache_epoch: str, n
                 except Exception:
                     pass
         else:
-            root_kids = list_children(snap_id, max_items=2000)
+            root_kids = list_children_safe(snap_id, max_items=2000)
             files_only = [f for f in root_kids if f.get("mimeType") != "application/vnd.google-apps.folder"]
 
             kn_legacy = [f for f in files_only if _match_legacy_master_name(f.get("name",""), "KN")]
             if not kn_legacy:
                 for sf in [f for f in root_kids if f.get("mimeType") == "application/vnd.google-apps.folder"]:
-                    cand = [f for f in list_children(sf["id"], max_items=2000)
+                    cand = [f for f in list_children_safe(sf["id"], max_items=2000)
                             if f.get("mimeType") != "application/vnd.google-apps.folder"
                             and _match_legacy_master_name(f.get("name", ""), "KN")]
                     if cand:
@@ -705,7 +765,7 @@ def build_master_index_by_snapshot_date(root_folder_id: str, cache_epoch: str, n
             bn_legacy = [f for f in files_only if _match_legacy_master_name(f.get("name",""), "BN")]
             if not bn_legacy:
                 for sf in [f for f in root_kids if f.get("mimeType") == "application/vnd.google-apps.folder"]:
-                    cand = [f for f in list_children(sf["id"], max_items=2000)
+                    cand = [f for f in list_children_safe(sf["id"], max_items=2000)
                             if f.get("mimeType") != "application/vnd.google-apps.folder"
                             and _match_legacy_master_name(f.get("name",""), "BN")]
                     if cand: bn_legacy = cand; break
@@ -799,7 +859,7 @@ if OFFLINE_DEPLOY:
         epoch = st.session_state.get("DRIVE_EPOCH", "0")
         key = f"drive_kids::{epoch}::{folder_id}"
         if key not in st.session_state:
-            st.session_state[key] = list_children(folder_id, max_items=2000)
+            st.session_state[key] = (list_children_safe(folder_id, max_items=2000) or [])
         return st.session_state[key]
 
     def ensure_chunk_cached(chunk_name: str, folder_id: str, subdir: str, force: bool = False):
@@ -854,7 +914,7 @@ if OFFLINE_DEPLOY:
             return None
 
     def find_subfolder_by_name(root_id: str, name_ci: str):
-        kids = list_children(root_id, max_items=2000)
+        kids = list_children_safe(root_id, max_items=2000)
         for k in kids:
             if k.get("mimeType") == "application/vnd.google-apps.folder" and k.get("name", "").lower() == name_ci.lower():
                 return k
@@ -1144,7 +1204,7 @@ _render_welcome_overlay()
 @st.cache_data(show_spinner=False)
 def list_autostart_logs(raw_folder_id: str, cache_epoch: str, nocache: str = "stable") -> List[Dict[str, Any]]:
     """Return files under /Power logs/raw matching *__gui_autostart.log, newest first."""
-    kids = list_children(raw_folder_id, max_items=2000)
+    kids = list_children_safe(raw_folder_id, max_items=2000)
     files = [k for k in kids
              if k.get("mimeType") != "application/vnd.google-apps.folder"
              and LOG_AUTOSTART_RE.match(k.get("name",""))]
@@ -1562,7 +1622,7 @@ with tab3:
         st.error("Google Drive is not configured in secrets."); st.stop()
 
     def find_subfolder_by_name(root_id: str, name_ci: str) -> Optional[Dict[str, Any]]:
-        kids = list_children(root_id, max_items=2000)
+        kids = list_children_safe(root_id, max_items=2000)
         for k in kids:
             if k.get("mimeType")=="application/vnd.google-apps.folder" and k.get("name","").lower()==name_ci.lower():
                 return k
@@ -1577,7 +1637,7 @@ with tab3:
 
     @st.cache_data(show_spinner=True)
     def list_power_logs(folder_id: str, cache_epoch: str, nocache: str = "stable") -> List[Dict[str, Any]]:
-        kids = list_children(folder_id, max_items=2000)
+        kids = list_children_safe(folder_id, max_items=2000)
         files = [k for k in kids if k.get("mimeType") != "application/vnd.google-apps.folder" and LOG_RE.match(k.get("name",""))]
         files.sort(key=lambda m: m.get("name",""), reverse=True)
         return files
