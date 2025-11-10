@@ -167,11 +167,11 @@ CUTOFF_NEW  = date(2025, 10, 31)  # new format becomes active on/after this date
 # Preset field nodes (extend as you add sites)
 NODES = [
     {
-        "key": "Auckland-Orākei",
-        "name": "Auckland — Orākei",
-        "lat": -36.8528,     # approx Orākei
-        "lon": 174.8150,
-        "desc": "Primary demo node in Orākei, Auckland",
+        "key": "Auckland-Sunnyhills",
+        "name": "Auckland-Sunnyhills",
+        "lat": -36.8925,     # approx Orākei
+        "lon": 174.8914,
+        "desc": "Primary demo node in Sunnyhills, Auckland",
     },
     # Add more nodes here as needed...
 ]
