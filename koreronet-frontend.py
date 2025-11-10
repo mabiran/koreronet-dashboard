@@ -179,6 +179,29 @@ st.markdown("""
 }
 .feature-icon{ font-size: 1.4rem; line-height: 1.4rem; }
 .feature-text{ font-size: 1rem; line-height: 1.3rem; flex: 1; }
+/* Reduce map and plot width, add side margins for safe scrolling */
+.stPlotlyChart, .stPydeckChart, .stFolioMap {
+  max-width: 92% !important;
+  margin: 0 auto 1.5rem auto !important;
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+/* Optional: if streamlit-folium uses an iframe, ensure same margins */
+iframe[title*="folium"], iframe[title*="pydeck"] {
+  max-width: 92% !important;
+  margin: 0 auto 1.5rem auto !important;
+  display: block;
+  border-radius: 12px;
+}
+
+/* Add a little horizontal padding on narrow screens */
+@media (max-width: 1000px) {
+  .stPlotlyChart, .stPydeckChart, .stFolioMap, iframe[title*="folium"] {
+    max-width: 98% !important;
+  }
+}
+
 </style>
 """, unsafe_allow_html=True)
 
