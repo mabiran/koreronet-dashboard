@@ -1268,63 +1268,64 @@ with tab_nodes:
         center_lat, center_lon = -36.9003, 174.8839
 
 # ----- map fallbacks (folium → pydeck → plain plotly) with centered column -----
-col_l, col_mid, col_r = st.columns([1, 24, 1])  # side gutters
-with col_mid:
-    rendered = False
-    try:
-        import folium
-        from streamlit_folium import st_folium
-        m = folium.Map(location=[center_lat, center_lon], zoom_start=12, control_scale=True, tiles="OpenStreetMap")
-        for _, r in _df_nodes.iterrows():
-            folium.Circle(location=[float(r["lat"]), float(r["lon"])], radius=150,
-                          color=None, fill=True, fill_opacity=0.18, fill_color="#ff0000").add_to(m)
-            folium.CircleMarker(location=[float(r["lat"]), float(r["lon"])], radius=16,
-                                color=None, fill=True, fill_color="#ffffff", fill_opacity=1.0).add_to(m)
-            folium.CircleMarker(location=[float(r["lat"]), float(r["lon"])], radius=14,
-                                color=None, fill=True, fill_color="#dc143c", fill_opacity=0.95,
-                                tooltip=f"{r['name']}\n{r['desc']}").add_to(m)
-        # set a fixed width so it respects the column width and doesn't overflow
-        st_folium(m, width=950, height=520)
-        rendered = True
-    except Exception:
-        pass
-
-    if not rendered:
+with tab_nodes:
+    col_l, col_mid, col_r = st.columns([1, 24, 1])  # side gutters
+    with col_mid:
+        rendered = False
         try:
-            import pydeck as pdk
-            halo = pdk.Layer("ScatterplotLayer", data=_df_nodes, get_position='[lon, lat]',
-                             get_radius=180, get_fill_color='[255,0,0,46]', pickable=False)
-            white = pdk.Layer("ScatterplotLayer", data=_df_nodes, get_position='[lon, lat]',
-                              get_radius=24, get_fill_color='[255,255,255,255]', pickable=False)
-            main = pdk.Layer("ScatterplotLayer", data=_df_nodes, get_position='[lon, lat]',
-                             get_radius=20, get_fill_color='[220,20,60,242]', pickable=True)
-            view = pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=12)
-            st.pydeck_chart(
-                pdk.Deck(layers=[halo, white, main], initial_view_state=view,
-                         map_style=None, tooltip={"text": "{name}\n{desc}"}),
-                use_container_width=True,
-            )
+            import folium
+            from streamlit_folium import st_folium
+            m = folium.Map(location=[center_lat, center_lon], zoom_start=12, control_scale=True, tiles="OpenStreetMap")
+            for _, r in _df_nodes.iterrows():
+                folium.Circle(location=[float(r["lat"]), float(r["lon"])], radius=150,
+                              color=None, fill=True, fill_opacity=0.18, fill_color="#ff0000").add_to(m)
+                folium.CircleMarker(location=[float(r["lat"]), float(r["lon"])], radius=16,
+                                    color=None, fill=True, fill_color="#ffffff", fill_opacity=1.0).add_to(m)
+                folium.CircleMarker(location=[float(r["lat"]), float(r["lon"])], radius=14,
+                                    color=None, fill=True, fill_color="#dc143c", fill_opacity=0.95,
+                                    tooltip=f"{r['name']}\n{r['desc']}").add_to(m)
+            st_folium(m, width=950, height=520)
             rendered = True
         except Exception:
             pass
 
-    if not rendered:
-        import plotly.graph_objects as go
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=_df_nodes["lon"], y=_df_nodes["lat"], mode="markers",
-                                 marker=dict(size=30, color="rgba(255,0,0,0.18)"),
-                                 hoverinfo="skip", showlegend=False))
-        fig.add_trace(go.Scatter(x=_df_nodes["lon"], y=_df_nodes["lat"], mode="markers",
-                                 marker=dict(size=22, color="white"),
-                                 hoverinfo="skip", showlegend=False))
-        fig.add_trace(go.Scatter(x=_df_nodes["lon"], y=_df_nodes["lat"], mode="markers+text",
-                                 marker=dict(size=18, color="crimson"),
-                                 text=_df_nodes["name"], textposition="top center",
-                                 hovertext=_df_nodes["desc"], hoverinfo="text",
-                                 showlegend=False))
-        fig.update_layout(height=520, margin=dict(l=10, r=10, t=10, b=0),
-                          xaxis_title="Longitude", yaxis_title="Latitude")
-        st.plotly_chart(fig, use_container_width=True)
+        if not rendered:
+            try:
+                import pydeck as pdk
+                halo = pdk.Layer("ScatterplotLayer", data=_df_nodes, get_position='[lon, lat]',
+                                 get_radius=180, get_fill_color='[255,0,0,46]', pickable=False)
+                white = pdk.Layer("ScatterplotLayer", data=_df_nodes, get_position='[lon, lat]',
+                                  get_radius=24, get_fill_color='[255,255,255,255]', pickable=False)
+                main = pdk.Layer("ScatterplotLayer", data=_df_nodes, get_position='[lon, lat]',
+                                 get_radius=20, get_fill_color='[220,20,60,242]', pickable=True)
+                view = pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=12)
+                st.pydeck_chart(
+                    pdk.Deck(layers=[halo, white, main], initial_view_state=view,
+                             map_style=None, tooltip={"text": "{name}\n{desc}"}),
+                    use_container_width=True,
+                )
+                rendered = True
+            except Exception:
+                pass
+
+        if not rendered:
+            import plotly.graph_objects as go
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=_df_nodes["lon"], y=_df_nodes["lat"], mode="markers",
+                                     marker=dict(size=30, color="rgba(255,0,0,0.18)"),
+                                     hoverinfo="skip", showlegend=False))
+            fig.add_trace(go.Scatter(x=_df_nodes["lon"], y=_df_nodes["lat"], mode="markers",
+                                     marker=dict(size=22, color="white"),
+                                     hoverinfo="skip", showlegend=False))
+            fig.add_trace(go.Scatter(x=_df_nodes["lon"], y=_df_nodes["lat"], mode="markers+text",
+                                     marker=dict(size=18, color="crimson"),
+                                     text=_df_nodes["name"], textposition="top center",
+                                     hovertext=_df_nodes["desc"], hoverinfo="text",
+                                     showlegend=False))
+            fig.update_layout(height=520, margin=dict(l=10, r=10, t=10, b=0),
+                              xaxis_title="Longitude", yaxis_title="Latitude")
+            st.plotly_chart(fig, use_container_width=True)
+
 
 
 # =========================
