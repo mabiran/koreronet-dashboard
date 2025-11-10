@@ -169,9 +169,9 @@ NODES = [
     {
         "key": "Auckland-Sunnyhills",
         "name": "Auckland-Sunnyhills",
-        "lat": -36.8925,     # approx Orākei
-        "lon": 174.8914,
-        "desc": "Primary demo node in Sunnyhills, Auckland",
+        "lat": -36.9003,     # approx Orākei
+        "lon": 174.8839,
+        "desc": "Field node in Sunnyhills, Auckland",
     },
     # Add more nodes here as needed...
 ]
@@ -249,7 +249,7 @@ GDRIVE_FOLDER_ID = ROOT_LOCAL if OFFLINE_DEPLOY else _secret_or_env("GDRIVE_FOLD
 # Node Select (top bar) + single Refresh button (no live toggle)
 row_top = st.columns([3,2])
 with row_top[0]:
-    node = st.selectbox("Node Select", ["Auckland-Orākei"], index=0, key="node_select_top")
+    node = st.selectbox("Node Select", NODE_KEYS, index=0, key="node_select_top")
 with row_top[1]:
     if st.button("🔄 Refresh", key=k("btn_refresh_drive"), help="Clear caches & re-index Drive/local data"):
         try:
@@ -1201,7 +1201,7 @@ with tab_nodes:
         _center = _df_nodes[_df_nodes["key"] == st.session_state["active_node"]][["lat", "lon"]].iloc[0].to_dict()
         center_lat, center_lon = float(_center["lat"]), float(_center["lon"])
     except Exception:
-        center_lat, center_lon = -36.8528, 174.8150
+        center_lat, center_lon = -36.9003, 174.8839
 
     # ----- map fallbacks (folium → pydeck → plain plotly) -----
     rendered = False
