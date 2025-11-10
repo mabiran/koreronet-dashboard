@@ -1101,7 +1101,7 @@ def _render_welcome_overlay():
         # Start of overlay card
         st.markdown('<div class="overlay-card">', unsafe_allow_html=True)
         # Heading for the overlay: include both technology and summary sections
-        st.markdown('<div class="overlay-title">KōreroNET</div>', unsafe_allow_html=True)
+        # st.markdown('<div class="overlay-title">KōreroNET</div>', unsafe_allow_html=True)
         st.markdown('<div class="overlay-title">KōreroNET</div>', unsafe_allow_html=True)
 
         # NEW top Continue CTA
