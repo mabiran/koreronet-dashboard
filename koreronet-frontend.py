@@ -1130,8 +1130,12 @@ def _render_welcome_overlay():
         # NEW top Continue CTA
         st.markdown('<div class="overlay-cta-top">', unsafe_allow_html=True)
         cta_top = st.button("Continue →", type="primary", key=k("welcome_continue_top"))
+        if cta_top:
+            st.session_state["__welcome_done__"] = True
+            st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
         st.markdown('<div class="overlay-cta-hint">Click <b>Continue</b> to enter the dashboard.</div>', unsafe_allow_html=True)
+
 
         # ------------------------------------------------------------------
         # Technology highlights
@@ -1263,7 +1267,9 @@ with tab_nodes:
     except Exception:
         center_lat, center_lon = -36.9003, 174.8839
 
-    # ----- map fallbacks (folium → pydeck → plain plotly) -----
+# ----- map fallbacks (folium → pydeck → plain plotly) with centered column -----
+col_l, col_mid, col_r = st.columns([1, 24, 1])  # side gutters
+with col_mid:
     rendered = False
     try:
         import folium
@@ -1277,7 +1283,8 @@ with tab_nodes:
             folium.CircleMarker(location=[float(r["lat"]), float(r["lon"])], radius=14,
                                 color=None, fill=True, fill_color="#dc143c", fill_opacity=0.95,
                                 tooltip=f"{r['name']}\n{r['desc']}").add_to(m)
-        st_folium(m, width=None, height=520)
+        # set a fixed width so it respects the column width and doesn't overflow
+        st_folium(m, width=950, height=520)
         rendered = True
     except Exception:
         pass
@@ -1292,8 +1299,11 @@ with tab_nodes:
             main = pdk.Layer("ScatterplotLayer", data=_df_nodes, get_position='[lon, lat]',
                              get_radius=20, get_fill_color='[220,20,60,242]', pickable=True)
             view = pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=12)
-            st.pydeck_chart(pdk.Deck(layers=[halo, white, main], initial_view_state=view,
-                                     map_style=None, tooltip={"text": "{name}\n{desc}"}))
+            st.pydeck_chart(
+                pdk.Deck(layers=[halo, white, main], initial_view_state=view,
+                         map_style=None, tooltip={"text": "{name}\n{desc}"}),
+                use_container_width=True,
+            )
             rendered = True
         except Exception:
             pass
@@ -1312,9 +1322,10 @@ with tab_nodes:
                                  text=_df_nodes["name"], textposition="top center",
                                  hovertext=_df_nodes["desc"], hoverinfo="text",
                                  showlegend=False))
-        fig.update_layout(height=520, margin=dict(l=0, r=0, t=10, b=0),
+        fig.update_layout(height=520, margin=dict(l=10, r=10, t=10, b=0),
                           xaxis_title="Longitude", yaxis_title="Latitude")
         st.plotly_chart(fig, use_container_width=True)
+
 
 # =========================
 # TAB 1 — Detections (root)
