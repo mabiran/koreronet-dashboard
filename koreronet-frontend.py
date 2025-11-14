@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # KōreroNET Dashboard (with splash + Drive)
@@ -1147,7 +1148,7 @@ def _render_welcome_overlay():
         # extend this list – these represent the core capabilities of the
         # bioacoustic monitoring platform.
         features: List[Tuple[str, str]] = [
-            ('🔊', 'Bioacoustic monitoring of all vocal species in New Zealand wildlife.'),
+            ('🔊', 'Bioacoustic monitoring of all vocal species in New Zealand wildlife.'),
             ('🎧', 'Full-spectrum recording: ultrasonic and audible ranges.'),
             ('🤖', 'Autonomous detection powered by our in‑house AI models.'),
             ('🎛️', 'On‑device edge computing and recording in a single package.'),
@@ -1782,13 +1783,12 @@ with tab3:
 # TAB 4 — GUI autostart log tail
 # ================================
 with tab4:
-    st.subheader("GUI Autostart — latest log (last 500 lines)")
-
+    st.subheader("GUI Autostart — latest log (tail 500)")
     if not drive_enabled():
-        st.error("Google Drive is not configured in secrets.")
-        st.stop()
+        st.error("Google Drive is not configured in secrets."); st.stop()
 
-    # Locate: <root> / Power logs / raw
+    # Locate: From the node / Power logs / raw
+    # (Your Drive root is the GDRIVE_FOLDER_ID; “From the node” is already your root clone)
     power_folder = find_subfolder_by_name(GDRIVE_FOLDER_ID, "Power logs")
     if not power_folder:
         st.warning("Could not find 'Power logs' under the Drive root.")
@@ -1802,69 +1802,61 @@ with tab4:
     cache_epoch = st.session_state.get("DRIVE_EPOCH", "0")
     files = list_autostart_logs(raw_folder["id"], cache_epoch=cache_epoch)
 
-    colA, colB = st.columns([1, 3])
+    colA, colB = st.columns([1,3])
     with colA:
-        if st.button("🔄 Refresh", key=k("tab4_refresh")):
-            # Force cache bust
-            st.cache_data.clear()
-            st.rerun()
+        do_refresh = st.button("🔄 Refresh", key=k("tab4_refresh"))
+    if do_refresh:
+        # force cache bust by clearing and re-running
+        st.cache_data.clear()
+        st.rerun()
 
     if not files:
         st.info("No files matching `*__gui_autostart.log` were found in Power logs/raw.")
         st.stop()
 
-    latest = files[0]  # newest first by name
+    latest = files[0]  # already newest first
     local = ensure_raw_cached(latest, force=False)
 
-    if not local.exists():
-        st.warning(f"Local copy for `{latest.get('name','?')}` not found.")
-        st.stop()
-
-    # Much simpler + robust tail implementation
-    def tail_lines_simple(path: Path, max_lines: int = 500) -> List[str]:
+    # Tail last 500 lines efficiently (avoid loading huge logs)
+    def tail_lines(path: Path, max_lines: int = 500, block_size: int = 8192) -> List[str]:
         try:
-            size = path.stat().st_size
-
-            # For reasonably sized logs, just read the whole file
-            if size <= 2 * 1024 * 1024:  # <= 2 MB
-                txt = path.read_text(encoding="utf-8", errors="ignore")
-                return txt.splitlines()[-max_lines:]
-
-            # For larger logs, read the last chunk of bytes
             with open(path, "rb") as f:
-                # heuristic: ~2000 bytes per line upper bound
-                back_bytes = min(size, max_lines * 2000)
-                f.seek(-back_bytes, os.SEEK_END)
-                data = f.read()
-
-            return data.decode("utf-8", errors="ignore").splitlines()[-max_lines:]
+                f.seek(0, os.SEEK_END)
+                end = f.tell()
+                lines: List[bytes] = []
+                buf = b""
+                while end > 0 and len(lines) <= max_lines:
+                    read_size = min(block_size, end)
+                    end -= read_size
+                    f.seek(end, os.SEEK_SET)
+                    chunk = f.read(read_size)
+                    buf = chunk + buf
+                    parts = buf.split(b"\n")
+                    # keep the first partial; count full lines from the end
+                    buf = parts[0]
+                    lines_chunk = parts[1:]
+                    lines = lines_chunk + lines
+                # Convert to text and take the tail
+                text_lines = b"\n".join(lines).decode("utf-8", errors="replace").splitlines()
+                return text_lines[-max_lines:]
         except Exception as e:
             return [f"[tail error] {e!s}"]
 
-    lines = tail_lines_simple(local, max_lines=500)
+    lines = tail_lines(local, max_lines=500)
+    lines = list(reversed(lines))  # newest first
+    numbered = "\n".join(f"{i+1:>4}  {line}" for i, line in enumerate(lines))
+    st.code(numbered, language="log")
 
-    if not lines:
-        st.info("Log file is empty.")
-        shown = 0
-    else:
-        shown = min(500, len(lines))
-        # Normal reading order: oldest at top, newest at bottom
-        numbered = "\n".join(f"{i+1:>4}  {line}" for i, line in enumerate(lines))
-        # Use 'text' so we don't depend on a 'log' lexer
-        st.code(numbered, language="text")
 
     # Header info + download
-    fn = latest.get("name", "(unknown)")
-    st.caption(f"Showing last {shown} line(s) of: `{fn}`")
-
+    fn = latest.get("name","(unknown)")
+    st.caption(f"Showing last 500 lines of: `{fn}`")
     try:
-        with open(local, "rb") as fh:
-            st.download_button(
-                "Download full log",
-                fh,
-                file_name=fn,
-                mime="text/plain",
-                key=k("dl_gui_log"),
-            )
+        with open(local, "rb") as _fh:
+            st.download_button("Download full log", _fh, file_name=fn, mime="text/plain", key=k("dl_gui_log"))
     except Exception:
         pass
+
+    # Display with line numbers
+    numbered = "\n".join(f"{i+1:>4}  {line}" for i, line in enumerate(lines))
+    st.code(numbered, language="log")
