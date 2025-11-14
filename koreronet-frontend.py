@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # KōreroNET Dashboard (with splash + Drive)
@@ -68,85 +69,139 @@ def _retry(exceptions=(Exception,), tries=3, base_delay=0.35, max_delay=1.2, jit
 st.set_page_config(page_title="KōreroNET Dashboard", layout="wide")
 st.markdown("""
 <style>
+/* Global container tweaks */
+.block-container { padding-top: 1rem; padding-bottom: 1rem; }
 
-[data-testid="stDecoration"] { display: none !important; }
-.block-container {padding-top:1rem; padding-bottom:1rem;}
-.center-wrap {display:flex; align-items:center; justify-content:center; min-height:65vh; text-align:center;}
-.brand-title {font-size: clamp(48px, 8vw, 96px); font-weight: 800; letter-spacing: .02em;}
-.brand-sub {font-size: clamp(28px, 4vw, 48px); font-weight: 600; opacity:.9; margin-top:.4rem;}
-.fade-enter {animation: fadeIn 400ms ease forwards;}
-.fade-exit  {animation: fadeOut 400ms ease forwards;}
-@keyframes fadeIn { from {opacity:0} to {opacity:1} }
-@keyframes fadeOut { from {opacity:1} to {opacity:0} }
-
-/* FIX: correct property so keyframes don’t glitch */
-.pulse {position:relative; width:14px; height:14px; margin:18px auto 0; border-radius:50%; background:#16a34a; box-shadow:0 0 0 rgba(22,163,74,.7); animation: pulse 1.6s infinite;}
-@keyframes pulse { 
-  0%   { box-shadow:0 0 0 0 rgba(22,163,74,.7); } 
-  70%  { box-shadow:0 0 0 22px rgba(22,163,74,0); } 
-  100% { box-shadow:0 0 0 0 rgba(22,163,74,0); } 
-}
-
-.stTabs [role="tablist"] {gap:.5rem;}
-.stTabs [role="tab"] {padding:.6rem 1rem; border-radius:999px; border:1px solid #3a3a3a;}
-.small {font-size:0.9rem; opacity:0.85;}
-
-/* Overlay card — remove border/gradient that looked like a ribbon */
-.overlay-card {
-  max-width: 860px; margin: 6vh auto; padding: 24px 28px; border: none;
-  border-radius: 16px;
-  background: rgba(28,28,28,.96); /* solid, no gradient banding */
-  box-shadow: 0 10px 30px rgba(0,0,0,.35);
-}
-.overlay-title {font-size: clamp(28px,4vw,42px); font-weight: 800; letter-spacing:.01em; margin-bottom:.25rem;}
-.overlay-sub {font-size: clamp(16px,2.2vw,18px); opacity:.9; margin-bottom: .75rem;}
-.overlay-pill {
-  display:inline-block; padding: .35rem .75rem; border: 1px solid #444; border-radius: 999px;
-  margin:.25rem .25rem 0 0; font-size:.95rem; background: rgba(255,255,255,.03);
-}
-
-/* Make any <hr> or dividers inside overlays transparent, just in case */
-.overlay-card hr { border: 0; height: 0; }
-/* Hide any empty elements inside overlay so they don't render as a fat pill */
-.overlay-card :where(p,div,span):empty { display: none !important; }
-
-/*
- * Features grid styles for the welcome overlay. This layout is inspired by
- * the rectangular technology highlight cards on the Hark website. Each
- * feature consists of a small icon and a brief description. The grid
- * automatically wraps based on screen width and keeps spacing consistent.
- */
-.features-grid {
-  display: grid;
-  /* Adjust the minimum column width to ensure cards wrap nicely on narrow screens */
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  gap: 1rem;
-  margin-top: 1rem;
-}
-.feature-card {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.65rem;
-  /* A subtle translucent background to delineate each card */
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.05);
-  border-radius: 12px;
-  padding: 0.75rem 0.9rem;
-}
-.feature-icon {
-  font-size: 1.4rem;
-  line-height: 1.4rem;
-}
-.feature-text {
-  font-size: 1rem;
-  line-height: 1.3rem;
-  flex: 1;
-}
-
-/* Also hide Streamlit's status/decoration bars just in case */
+/* Hide Streamlit chrome */
 [data-testid="stHeader"] { background: transparent !important; }
 [data-testid="stDecoration"] { display: none !important; }
 [data-testid="stStatusWidget"] { display: none !important; }
+
+/* Centered splash wrapper */
+.center-wrap {
+  display: flex; align-items: center; justify-content: center;
+  min-height: 65vh; text-align: center;
+}
+
+/* Brand text (splash) */
+.brand-title { font-size: clamp(48px, 8vw, 96px); font-weight: 800; letter-spacing: .02em; }
+.brand-sub   { font-size: clamp(28px, 4vw, 48px); font-weight: 600; opacity: .9; margin-top: .4rem; }
+
+/* Simple fade helpers */
+.fade-enter { animation: fadeIn 400ms ease forwards; }
+.fade-exit  { animation: fadeOut 400ms ease forwards; }
+@keyframes fadeIn { from {opacity:0} to {opacity:1} }
+@keyframes fadeOut { from {opacity:1} to {opacity:0} }
+
+/* Alive dot pulse under AUT */
+.pulse {
+  position: relative; width: 14px; height: 14px; margin: 18px auto 0;
+  border-radius: 50%; background: #16a34a; box-shadow: 0 0 0 rgba(22,163,74,.7);
+  animation: pulse 1.6s infinite;
+}
+@keyframes pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(22,163,74,.7); }
+  70%  { box-shadow: 0 0 0 22px rgba(22,163,74,0); }
+  100% { box-shadow: 0 0 0 0 rgba(22,163,74,0); }
+}
+
+/* Tabs look */
+.stTabs [role="tablist"] { gap: .5rem; }
+.stTabs [role="tab"] {
+  padding: .6rem 1rem; border-radius: 999px; border: 1px solid #3a3a3a;
+}
+
+/* Small helper text */
+.small { font-size: 0.9rem; opacity: 0.85; }
+
+/* Overlay card — solid background to avoid banding */
+.overlay-card {
+  max-width: 860px; margin: 6vh auto; padding: 24px 28px;
+  border: none; border-radius: 16px;
+  background: rgba(28,28,28,.96);
+  box-shadow: 0 10px 30px rgba(0,0,0,.35);
+}
+.overlay-title { font-size: clamp(28px,4vw,42px); font-weight: 800; letter-spacing:.01em; margin-bottom:.25rem; }
+.overlay-sub   { font-size: clamp(16px,2.2vw,18px); opacity:.9; margin-bottom: .75rem; }
+.overlay-pill  {
+  display:inline-block; padding:.35rem .75rem; border:1px solid #444; border-radius:999px;
+  margin:.25rem .25rem 0 0; font-size:.95rem; background: rgba(255,255,255,.03);
+}
+
+/* Transparent hr and trim empty DOM nodes inside overlay */
+.overlay-card hr { border: 0; height: 0; }
+.overlay-card :where(p,div,span):empty { display: none !important; }
+
+/* --- NEW: Sticky top CTA + hint (use in overlay) --- */
+.overlay-cta-top{
+  position: sticky; top: -12px; z-index: 3;
+  margin: -8px -8px 12px -8px; padding: 10px 12px;
+  background: rgba(28,28,28,.98); border-bottom: 1px solid #333;
+  display:flex; justify-content:center;
+}
+.overlay-cta-hint{ font-size:.95rem; opacity:.9; margin-top:.35rem; text-align:center; }
+
+/* --- NEW: Make overlay buttons unmissable (scoped) --- */
+.overlay-card .stButton > button{
+  font-size: 1.15rem; font-weight: 800;
+  padding: .9rem 1.35rem; border-radius: 999px;
+  border: 2px solid #22c55e;
+  background: linear-gradient(180deg,#22c55e,#16a34a);
+  color:#0b0f0c;
+  box-shadow: 0 10px 28px rgba(34,197,94,.35);
+  transition: transform .12s ease, box-shadow .12s ease;
+}
+.overlay-card .stButton > button:hover{
+  transform: translateY(-1px);
+  box-shadow: 0 14px 32px rgba(34,197,94,.45);
+}
+/* Focus ring for accessibility */
+.overlay-card .stButton > button:focus{
+  outline: 3px solid rgba(34,197,94,.6);
+  outline-offset: 2px;
+}
+
+/* Subtle arrow nudge animation (applies if label contains →) */
+@keyframes nudge { 0%,100%{transform:translateX(0)} 50%{transform:translateX(4px)} }
+.overlay-card .stButton > button span{
+  display:inline-block; animation:nudge 1.2s ease-in-out infinite;
+}
+
+/* Features grid (welcome overlay) */
+.features-grid{
+  display:grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 1rem; margin-top: 1rem;
+}
+.feature-card{
+  display:flex; align-items:flex-start; gap:.65rem;
+  background: rgba(255,255,255,.03);
+  border: 1px solid rgba(255,255,255,.05);
+  border-radius: 12px; padding: .75rem .9rem;
+}
+.feature-icon{ font-size: 1.4rem; line-height: 1.4rem; }
+.feature-text{ font-size: 1rem; line-height: 1.3rem; flex: 1; }
+/* Reduce map and plot width, add side margins for safe scrolling */
+.stPlotlyChart, .stPydeckChart, .stFolioMap {
+  max-width: 92% !important;
+  margin: 0 auto 1.5rem auto !important;
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+/* Optional: if streamlit-folium uses an iframe, ensure same margins */
+iframe[title*="folium"], iframe[title*="pydeck"] {
+  max-width: 92% !important;
+  margin: 0 auto 1.5rem auto !important;
+  display: block;
+  border-radius: 12px;
+}
+
+/* Add a little horizontal padding on narrow screens */
+@media (max-width: 1000px) {
+  .stPlotlyChart, .stPydeckChart, .stFolioMap, iframe[title*="folium"] {
+    max-width: 98% !important;
+  }
+}
 
 </style>
 """, unsafe_allow_html=True)
@@ -164,14 +219,15 @@ NEW_ROOT_KN = re.compile(r"^\d{8}_\d{6}_koreronet_master\.csv$", re.IGNORECASE)
 SNAP_RE     = re.compile(r"^(\d{8})_(\d{6})$", re.IGNORECASE)
 LOG_AUTOSTART_RE = re.compile(r"^(\d{8})_(\d{6})__gui_autostart\.log$", re.IGNORECASE)
 CUTOFF_NEW  = date(2025, 10, 31)  # new format becomes active on/after this date
+
 # Preset field nodes (extend as you add sites)
 NODES = [
     {
-        "key": "Auckland-Orākei",
-        "name": "Auckland — Orākei",
-        "lat": -36.8528,     # approx Orākei
-        "lon": 174.8150,
-        "desc": "Primary demo node in Orākei, Auckland",
+        "key": "Auckland-Sunnyhills",
+        "name": "Auckland-Sunnyhills",
+        "lat": -36.9003,     # approx Orākei
+        "lon": 174.8839,
+        "desc": "Field node in Sunnyhills, Auckland",
     },
     # Add more nodes here as needed...
 ]
@@ -210,8 +266,6 @@ def k(name: str) -> str:
     """Unique widget key helper."""
     return f"{name}::{st.session_state['_sess_salt']}"
 
-
-
 # ============================================================================
 # Caches & local fallback
 # ============================================================================
@@ -245,11 +299,10 @@ def _secret_or_env(name: str, default=None):
 GDRIVE_FOLDER_ID = ROOT_LOCAL if OFFLINE_DEPLOY else _secret_or_env("GDRIVE_FOLDER_ID", None)
 
 # Top bar
-# Node Select (top bar) + manual refresh + LIVE toggle
-# Node Select (top bar) + single Refresh button (no live toggle)
+# Node Select (top bar) + manual refresh
 row_top = st.columns([3,2])
 with row_top[0]:
-    node = st.selectbox("Node Select", ["Auckland-Orākei"], index=0, key="node_select_top")
+    node = st.selectbox("Node Select", NODE_KEYS, index=0, key="node_select_top")
 with row_top[1]:
     if st.button("🔄 Refresh", key=k("btn_refresh_drive"), help="Clear caches & re-index Drive/local data"):
         try:
@@ -262,6 +315,7 @@ with row_top[1]:
             st.rerun()
         except Exception as e:
             st.warning(f"Refresh encountered a non-fatal error: {e!s}")
+
 
 
 
@@ -1071,8 +1125,19 @@ def _render_welcome_overlay():
         # Start of overlay card
         st.markdown('<div class="overlay-card">', unsafe_allow_html=True)
         # Heading for the overlay: include both technology and summary sections
+        # st.markdown('<div class="overlay-title">KōreroNET</div>', unsafe_allow_html=True)
         st.markdown('<div class="overlay-title">KōreroNET</div>', unsafe_allow_html=True)
-        
+
+        # NEW top Continue CTA
+        st.markdown('<div class="overlay-cta-top">', unsafe_allow_html=True)
+        cta_top = st.button("Continue →", type="primary", key=k("welcome_continue_top"))
+        if cta_top:
+            st.session_state["__welcome_done__"] = True
+            st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+        st.markdown('<div class="overlay-cta-hint">Click <b>Continue</b> to enter the dashboard.</div>', unsafe_allow_html=True)
+
+
         # ------------------------------------------------------------------
         # Technology highlights
         # ------------------------------------------------------------------
@@ -1083,7 +1148,7 @@ def _render_welcome_overlay():
         # extend this list – these represent the core capabilities of the
         # bioacoustic monitoring platform.
         features: List[Tuple[str, str]] = [
-            ('🔊', 'Bioacoustic monitoring of all vocal species in New Zealand wildlife.'),
+            ('🔊', 'Bioacoustic monitoring of all vocal species in New Zealand wildlife.'),
             ('🎧', 'Full-spectrum recording: ultrasonic and audible ranges.'),
             ('🤖', 'Autonomous detection powered by our in‑house AI models.'),
             ('🎛️', 'On‑device edge computing and recording in a single package.'),
@@ -1201,60 +1266,68 @@ with tab_nodes:
         _center = _df_nodes[_df_nodes["key"] == st.session_state["active_node"]][["lat", "lon"]].iloc[0].to_dict()
         center_lat, center_lon = float(_center["lat"]), float(_center["lon"])
     except Exception:
-        center_lat, center_lon = -36.8528, 174.8150
+        center_lat, center_lon = -36.9003, 174.8839
 
-    # ----- map fallbacks (folium → pydeck → plain plotly) -----
-    rendered = False
-    try:
-        import folium
-        from streamlit_folium import st_folium
-        m = folium.Map(location=[center_lat, center_lon], zoom_start=12, control_scale=True, tiles="OpenStreetMap")
-        for _, r in _df_nodes.iterrows():
-            folium.Circle(location=[float(r["lat"]), float(r["lon"])], radius=150,
-                          color=None, fill=True, fill_opacity=0.18, fill_color="#ff0000").add_to(m)
-            folium.CircleMarker(location=[float(r["lat"]), float(r["lon"])], radius=16,
-                                color=None, fill=True, fill_color="#ffffff", fill_opacity=1.0).add_to(m)
-            folium.CircleMarker(location=[float(r["lat"]), float(r["lon"])], radius=14,
-                                color=None, fill=True, fill_color="#dc143c", fill_opacity=0.95,
-                                tooltip=f"{r['name']}\n{r['desc']}").add_to(m)
-        st_folium(m, width=None, height=520)
-        rendered = True
-    except Exception:
-        pass
-
-    if not rendered:
+# ----- map fallbacks (folium → pydeck → plain plotly) with centered column -----
+with tab_nodes:
+    col_l, col_mid, col_r = st.columns([1, 24, 1])  # side gutters
+    with col_mid:
+        rendered = False
         try:
-            import pydeck as pdk
-            halo = pdk.Layer("ScatterplotLayer", data=_df_nodes, get_position='[lon, lat]',
-                             get_radius=180, get_fill_color='[255,0,0,46]', pickable=False)
-            white = pdk.Layer("ScatterplotLayer", data=_df_nodes, get_position='[lon, lat]',
-                              get_radius=24, get_fill_color='[255,255,255,255]', pickable=False)
-            main = pdk.Layer("ScatterplotLayer", data=_df_nodes, get_position='[lon, lat]',
-                             get_radius=20, get_fill_color='[220,20,60,242]', pickable=True)
-            view = pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=12)
-            st.pydeck_chart(pdk.Deck(layers=[halo, white, main], initial_view_state=view,
-                                     map_style=None, tooltip={"text": "{name}\n{desc}"}))
+            import folium
+            from streamlit_folium import st_folium
+            m = folium.Map(location=[center_lat, center_lon], zoom_start=12, control_scale=True, tiles="OpenStreetMap")
+            for _, r in _df_nodes.iterrows():
+                folium.Circle(location=[float(r["lat"]), float(r["lon"])], radius=150,
+                              color=None, fill=True, fill_opacity=0.18, fill_color="#ff0000").add_to(m)
+                folium.CircleMarker(location=[float(r["lat"]), float(r["lon"])], radius=16,
+                                    color=None, fill=True, fill_color="#ffffff", fill_opacity=1.0).add_to(m)
+                folium.CircleMarker(location=[float(r["lat"]), float(r["lon"])], radius=14,
+                                    color=None, fill=True, fill_color="#dc143c", fill_opacity=0.95,
+                                    tooltip=f"{r['name']}\n{r['desc']}").add_to(m)
+            st_folium(m, width=950, height=520)
             rendered = True
         except Exception:
             pass
 
-    if not rendered:
-        import plotly.graph_objects as go
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=_df_nodes["lon"], y=_df_nodes["lat"], mode="markers",
-                                 marker=dict(size=30, color="rgba(255,0,0,0.18)"),
-                                 hoverinfo="skip", showlegend=False))
-        fig.add_trace(go.Scatter(x=_df_nodes["lon"], y=_df_nodes["lat"], mode="markers",
-                                 marker=dict(size=22, color="white"),
-                                 hoverinfo="skip", showlegend=False))
-        fig.add_trace(go.Scatter(x=_df_nodes["lon"], y=_df_nodes["lat"], mode="markers+text",
-                                 marker=dict(size=18, color="crimson"),
-                                 text=_df_nodes["name"], textposition="top center",
-                                 hovertext=_df_nodes["desc"], hoverinfo="text",
-                                 showlegend=False))
-        fig.update_layout(height=520, margin=dict(l=0, r=0, t=10, b=0),
-                          xaxis_title="Longitude", yaxis_title="Latitude")
-        st.plotly_chart(fig, use_container_width=True)
+        if not rendered:
+            try:
+                import pydeck as pdk
+                halo = pdk.Layer("ScatterplotLayer", data=_df_nodes, get_position='[lon, lat]',
+                                 get_radius=180, get_fill_color='[255,0,0,46]', pickable=False)
+                white = pdk.Layer("ScatterplotLayer", data=_df_nodes, get_position='[lon, lat]',
+                                  get_radius=24, get_fill_color='[255,255,255,255]', pickable=False)
+                main = pdk.Layer("ScatterplotLayer", data=_df_nodes, get_position='[lon, lat]',
+                                 get_radius=20, get_fill_color='[220,20,60,242]', pickable=True)
+                view = pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=12)
+                st.pydeck_chart(
+                    pdk.Deck(layers=[halo, white, main], initial_view_state=view,
+                             map_style=None, tooltip={"text": "{name}\n{desc}"}),
+                    use_container_width=True,
+                )
+                rendered = True
+            except Exception:
+                pass
+
+        if not rendered:
+            import plotly.graph_objects as go
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=_df_nodes["lon"], y=_df_nodes["lat"], mode="markers",
+                                     marker=dict(size=30, color="rgba(255,0,0,0.18)"),
+                                     hoverinfo="skip", showlegend=False))
+            fig.add_trace(go.Scatter(x=_df_nodes["lon"], y=_df_nodes["lat"], mode="markers",
+                                     marker=dict(size=22, color="white"),
+                                     hoverinfo="skip", showlegend=False))
+            fig.add_trace(go.Scatter(x=_df_nodes["lon"], y=_df_nodes["lat"], mode="markers+text",
+                                     marker=dict(size=18, color="crimson"),
+                                     text=_df_nodes["name"], textposition="top center",
+                                     hovertext=_df_nodes["desc"], hoverinfo="text",
+                                     showlegend=False))
+            fig.update_layout(height=520, margin=dict(l=10, r=10, t=10, b=0),
+                              xaxis_title="Longitude", yaxis_title="Latitude")
+            st.plotly_chart(fig, use_container_width=True)
+
+
 
 # =========================
 # TAB 1 — Detections (root)
