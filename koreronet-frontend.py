@@ -1782,50 +1782,6 @@ with tab3:
 # TAB 4 — GUI autostart log tail
 # ================================
 with tab4:
-    st.subheader("GUI Autostart — latest log (tail 500)")
-    if not drive_enabled():
-        st.error("Google Drive is not configured in secrets."); st.stop()
-
-    # Locate: From the node / Power logs / raw
-    # (Your Drive root is the GDRIVE_FOLDER_ID; “From the node” is already your root clone)
-    power_folder = find_subfolder_by_name(GDRIVE_FOLDER_ID, "Power logs")
-    if not power_folder:
-        st.warning("Could not find 'Power logs' under the Drive root.")
-        st.stop()
-
-    raw_folder = find_subfolder_by_name(power_folder["id"], "raw")
-    if not raw_folder:
-        st.warning("Could not find 'raw' inside 'Power logs'.")
-        st.stop()
-
-    cache_epoch = st.session_state.get("DRIVE_EPOCH", "0")
-    files = list_autostart_logs(raw_folder["id"], cache_epoch=cache_epoch)
-
-    colA, colB = st.columns([1,3])
-    with colA:
-        do_refresh = st.button("🔄 Refresh", key=k("tab4_refresh"))
-    if do_refresh:
-        # force cache bust by clearing and re-running
-        st.cache_data.clear()
-        st.rerun()
-
-    if not files:
-        st.info("No files matching `*__gui_autostart.log` were found in Power logs/raw.")
-        st.stop()
-
-    latest = files[0]  # already newest first
-    local = ensure_raw_cached(latest, force=False)
-
-    # Tail last 500 lines efficiently (avoid loading huge logs)
-    def tail_lines(path: Path, max_lines: int = 500, block_size: int = 8192) -> List[str]:
-        try:
-            with open(path, "rb") as f:
-                f.seek(0, os.SEEK_END)
-                end = f.tell()
-# ================================
-# TAB 4 — GUI autostart log tail
-# ================================
-with tab4:
     st.subheader("GUI Autostart — latest log (last 500 lines)")
 
     if not drive_enabled():
