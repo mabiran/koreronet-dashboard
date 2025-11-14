@@ -1822,7 +1822,7 @@ with tab4:
             with open(path, "rb") as f:
                 f.seek(0, os.SEEK_END)
                 end = f.tell()
-   # ================================
+# ================================
 # TAB 4 — GUI autostart log tail
 # ================================
 with tab4:
@@ -1865,10 +1865,7 @@ with tab4:
         st.stop()
 
     # Much simpler + robust tail implementation
-    from pathlib import Path
-    import os
-
-    def tail_lines_simple(path: Path, max_lines: int = 500) -> list[str]:
+    def tail_lines_simple(path: Path, max_lines: int = 500) -> List[str]:
         try:
             size = path.stat().st_size
 
@@ -1883,6 +1880,7 @@ with tab4:
                 back_bytes = min(size, max_lines * 2000)
                 f.seek(-back_bytes, os.SEEK_END)
                 data = f.read()
+
             return data.decode("utf-8", errors="ignore").splitlines()[-max_lines:]
         except Exception as e:
             return [f"[tail error] {e!s}"]
@@ -1891,15 +1889,16 @@ with tab4:
 
     if not lines:
         st.info("Log file is empty.")
+        shown = 0
     else:
-        # Show newest last (normal reading order) or flip if you prefer newest first
+        shown = min(500, len(lines))
+        # Normal reading order: oldest at top, newest at bottom
         numbered = "\n".join(f"{i+1:>4}  {line}" for i, line in enumerate(lines))
         # Use 'text' so we don't depend on a 'log' lexer
         st.code(numbered, language="text")
 
     # Header info + download
     fn = latest.get("name", "(unknown)")
-    shown = min(500, len(lines))
     st.caption(f"Showing last {shown} line(s) of: `{fn}`")
 
     try:
