@@ -1785,10 +1785,10 @@ with tab3:
 with tab4:
     st.subheader("GUI Autostart — latest log (tail 500)")
     if not drive_enabled():
-        st.error("Google Drive is not configured in secrets."); st.stop()
+        st.error("Google Drive is not configured in secrets.")
+        st.stop()
 
     # Locate: From the node / Power logs / raw
-    # (Your Drive root is the GDRIVE_FOLDER_ID; “From the node” is already your root clone)
     power_folder = find_subfolder_by_name(GDRIVE_FOLDER_ID, "Power logs")
     if not power_folder:
         st.warning("Could not find 'Power logs' under the Drive root.")
@@ -1802,24 +1802,47 @@ with tab4:
     cache_epoch = st.session_state.get("DRIVE_EPOCH", "0")
     files = list_autostart_logs(raw_folder["id"], cache_epoch=cache_epoch)
 
-    colA, colB = st.columns([1,3])
+    colA, colB = st.columns([1, 3])
     with colA:
         do_refresh = st.button("🔄 Refresh", key=k("tab4_refresh"))
     if do_refresh:
-        # force cache bust by clearing and re-running
+        # Clear Streamlit caches
         st.cache_data.clear()
+        # ALSO delete any cached GUI autostart logs, so they are re-downloaded
+        try:
+            for p in POWER_CACHE.glob("*__gui_autostart.log"):
+                p.unlink(missing_ok=True)
+        except Exception as e:
+            st.warning(f"Could not clear cached GUI logs: {e!s}")
         st.rerun()
 
     if not files:
         st.info("No files matching `*__gui_autostart.log` were found in Power logs/raw.")
         st.stop()
 
-    latest = files[0]  # already newest first
-    local = ensure_raw_cached(latest, force=False)
+    latest = files[0]  # newest first
+
+    # IMPORTANT: force=True so we don't get stuck with an old 0-byte cached copy
+    local = ensure_raw_cached(latest, force=True)
+
+    # Quick sanity info so you can see what's happening
+    try:
+        size_bytes = local.stat().st_size
+        st.caption(
+            f"Using local cache: `{local}` — size: {size_bytes} bytes "
+            f"(Drive name: `{latest.get('name','(unknown)')}`)"
+        )
+    except Exception as e:
+        st.warning(f"Local cache path issue: {e!s}")
 
     # Tail last 500 lines efficiently (avoid loading huge logs)
     def tail_lines(path: Path, max_lines: int = 500, block_size: int = 8192) -> List[str]:
         try:
+            if not path.exists():
+                return [f"[tail error] file does not exist: {path}"]
+            if path.stat().st_size == 0:
+                return ["[tail notice] log file is empty (0 bytes)."]
+
             with open(path, "rb") as f:
                 f.seek(0, os.SEEK_END)
                 end = f.tell()
@@ -1843,20 +1866,25 @@ with tab4:
             return [f"[tail error] {e!s}"]
 
     lines = tail_lines(local, max_lines=500)
-    lines = list(reversed(lines))  # newest first
+    # Newest first
+    lines = list(reversed(lines))
     numbered = "\n".join(f"{i+1:>4}  {line}" for i, line in enumerate(lines))
-    st.code(numbered, language="log")
-
 
     # Header info + download
-    fn = latest.get("name","(unknown)")
+    fn = latest.get("name", "(unknown)")
     st.caption(f"Showing last 500 lines of: `{fn}`")
+
     try:
         with open(local, "rb") as _fh:
-            st.download_button("Download full log", _fh, file_name=fn, mime="text/plain", key=k("dl_gui_log"))
-    except Exception:
-        pass
+            st.download_button(
+                "Download full log",
+                _fh,
+                file_name=fn,
+                mime="text/plain",
+                key=k("dl_gui_log"),
+            )
+    except Exception as e:
+        st.warning(f"Could not open cached log for download: {e!s}")
 
     # Display with line numbers
-    numbered = "\n".join(f"{i+1:>4}  {line}" for i, line in enumerate(lines))
     st.code(numbered, language="log")
