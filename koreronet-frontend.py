@@ -1467,17 +1467,31 @@ with tab1:
 # ================================
 # TAB 2 — Verify (snapshot date)
 # ================================
+# ================================
+# TAB 2 — Verify (snapshot date)
+# ================================
 with tab_verify:
     if not drive_enabled():
-        st.error("Google Drive is not configured in secrets."); st.stop()
+        st.error("Google Drive is not configured in secrets.")
+        st.stop()
+
+    # --- Small cooldown to avoid hammering audio playback ---
+    NAV_COOLDOWN_SECONDS = 0.4
+    if "tab2_last_play_ts" not in st.session_state:
+        st.session_state["tab2_last_play_ts"] = 0.0
 
     center2 = st.empty()
     with center2.container():
-        st.markdown('<div class="center-wrap fade-enter"><div>📚 Indexing master CSVs by snapshot date…</div></div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="center-wrap fade-enter"><div>📚 Indexing master CSVs by snapshot date…</div></div>',
+            unsafe_allow_html=True,
+        )
 
     cache_epoch = st.session_state.get("DRIVE_EPOCH", "0")
     try:
-        master = build_master_index_by_snapshot_date(GDRIVE_FOLDER_ID, cache_epoch=cache_epoch, nocache="stable")
+        master = build_master_index_by_snapshot_date(
+            GDRIVE_FOLDER_ID, cache_epoch=cache_epoch, nocache="stable"
+        )
     except Exception as e:
         master = pd.DataFrame()
         st.warning(f"Could not index masters (non-fatal): {e!s}")
@@ -1488,11 +1502,18 @@ with tab_verify:
         st.warning("No master CSVs found in any snapshot.")
         st.stop()
 
-    colA, colB = st.columns([2,1])
+    colA, colB = st.columns([2, 1])
     with colA:
-        src_mode_v = st.selectbox("Source", ["KōreroNET (KN)", "BirdNET (BN)", "Combined"], index=0, key=k("tab2_src"))
+        src_mode_v = st.selectbox(
+            "Source",
+            ["KōreroNET (KN)", "BirdNET (BN)", "Combined"],
+            index=0,
+            key=k("tab2_src"),
+        )
     with colB:
-        min_conf_v = st.slider("Min confidence", 0.0, 1.0, 0.90, 0.01, key=k("tab2_min_conf"))
+        min_conf_v = st.slider(
+            "Min confidence", 0.0, 1.0, 0.90, 0.01, key=k("tab2_min_conf")
+        )
 
     # Filter pool safely
     try:
@@ -1502,7 +1523,10 @@ with tab_verify:
             pool = master[master["Kind"] == "BN"]
         else:
             pool = master
-        pool = pool[pd.to_numeric(pool["Confidence"], errors="coerce") >= float(min_conf_v)]
+        pool = pool[
+            pd.to_numeric(pool["Confidence"], errors="coerce")
+            >= float(min_conf_v)
+        ]
     except Exception as e:
         pool = pd.DataFrame()
         st.warning(f"Filter error (non-fatal): {e!s}")
@@ -1517,10 +1541,17 @@ with tab_verify:
     except Exception:
         avail_days = []
     if not avail_days:
-        st.info("No detections for any date with current filters."); st.stop()
+        st.info("No detections for any date with current filters.")
+        st.stop()
 
     day_default = avail_days[-1]
-    day_pick = st.date_input("Day", value=day_default, min_value=avail_days[0], max_value=avail_days[-1], key=k("tab2_day"))
+    day_pick = st.date_input(
+        "Day",
+        value=day_default,
+        min_value=avail_days[0],
+        max_value=avail_days[-1],
+        key=k("tab2_day"),
+    )
 
     day_df = pool[pool["Date"] == day_pick]
     if day_df.empty:
@@ -1548,7 +1579,11 @@ with tab_verify:
     st.session_state[sel_key] = species
 
     # Build playlist, reset index if list changed
-    playlist = day_df[day_df["Label"] == species].sort_values(["Kind","ChunkName"]).reset_index(drop=True)
+    playlist = (
+        day_df[day_df["Label"] == species]
+        .sort_values(["Kind", "ChunkName"])
+        .reset_index(drop=True)
+    )
 
     pkey = f"v2_playlist_sig::{day_pick.isoformat()}::{src_mode_v}::{species}"
     sig = (len(playlist), tuple(playlist["ChunkName"].head(3)))
@@ -1559,48 +1594,63 @@ with tab_verify:
     idx_key = f"v2_idx::{pkey}"
     idx = int(st.session_state.get(idx_key, 0)) % max(1, len(playlist))
 
-    col1, col2, col3, col4 = st.columns([1,1,1,6])
-    autoplay = False
-    with col1:
-        if st.button("⏮ Prev", key=k("tab2_prev")):
-            idx = (idx - 1) % len(playlist); autoplay = True
-    with col2:
-        if st.button("▶ Play", key=k("tab2_play")):
-            autoplay = True
-    with col3:
-        if st.button("⏭ Next", key=k("tab2_next")):
-            idx = (idx + 1) % len(playlist); autoplay = True
-    st.session_state[idx_key] = idx
+    # ---- Navigation row ----
+    col1, col2, col3, col4 = st.columns([1, 1, 1, 6])
+    do_play = False  # only Play button will trigger audio fetch
 
     if playlist.empty:
-        st.info("No clips for this species and day."); st.stop()
+        st.info("No clips for this species and day.")
+        st.stop()
+
+    with col1:
+        if st.button("⏮ Prev", key=k("tab2_prev")):
+            idx = (idx - 1) % len(playlist)
+    with col2:
+        if st.button("▶ Play", key=k("tab2_play")):
+            now_ts = time.time()
+            if now_ts - st.session_state["tab2_last_play_ts"] >= NAV_COOLDOWN_SECONDS:
+                st.session_state["tab2_last_play_ts"] = now_ts
+                do_play = True
+            else:
+                st.info("Just a moment between plays to keep the server happy 😊")
+    with col3:
+        if st.button("⏭ Next", key=k("tab2_next")):
+            idx = (idx + 1) % len(playlist)
+    # col4 is just spacer
+    st.session_state[idx_key] = idx
 
     row = playlist.iloc[idx]
     try:
-        conf_val = float(row['Confidence'])
+        conf_val = float(row["Confidence"])
+        conf_str = f"{conf_val:.3f}"
     except Exception:
-        conf_val = float('nan')
-    st.markdown(f"**Date:** {row['Date']}  |  **Chunk:** `{row['ChunkName']}`  |  **Kind:** {row['Kind']}  |  **Confidence:** {conf_val:.3f}" if pd.notna(conf_val) else f"**Date:** {row['Date']}  |  **Chunk:** `{row['ChunkName']}`  |  **Kind:** {row['Kind']}")
+        conf_str = "n/a"
+
+    st.markdown(
+        f"**Date:** {row['Date']}  |  **Chunk:** `{row['ChunkName']}`  |  "
+        f"**Kind:** {row['Kind']}  |  **Confidence:** {conf_str}"
+    )
 
     # Safe audio fetch with retry
     @_retry()
     def _safe_chunk_cached(chunk_name: str, folder_id: str, subdir: str) -> Optional[Path]:
         return ensure_chunk_cached(chunk_name, folder_id, subdir=subdir, force=False)
 
-    def _play_audio(row_: pd.Series, auto: bool):
+    def _play_audio(row_: pd.Series):
         try:
-            chunk_name = str(row_.get("ChunkName","") or "")
-            folder_id  = str(row_.get("ChunkDriveFolderId","") or "")
-            kind       = str(row_.get("Kind","UNK") or "")
+            chunk_name = str(row_.get("ChunkName", "") or "")
+            folder_id = str(row_.get("ChunkDriveFolderId", "") or "")
+            kind = str(row_.get("Kind", "UNK") or "")
             if not chunk_name or not folder_id:
-                st.warning("No chunk mapping available."); return
+                st.warning("No chunk mapping available.")
+                return
             subdir = f"{kind}"
             with st.spinner("Fetching audio…"):
                 cached = _safe_chunk_cached(chunk_name, folder_id, subdir=subdir)
             if not cached or not cached.exists():
-                st.warning("Audio chunk not found in Drive folder."); return
+                st.warning("Audio chunk not found in Drive folder.")
+                return
             try:
-                # Guard against reading giant files into memory
                 if cached.stat().st_size > 30 * 1024 * 1024:  # 30 MB sanity cap
                     st.warning("Audio file too large to preview safely.")
                     return
@@ -1613,17 +1663,16 @@ with tab_verify:
                 st.warning(f"Cannot open audio chunk: {e!s}")
                 return
 
-            if auto:
-                import base64
-                b64 = base64.b64encode(data).decode()
-                st.markdown(f'<audio controls autoplay src="data:audio/wav;base64,{b64}"></audio>', unsafe_allow_html=True)
-            else:
-                st.audio(data, format="audio/wav")
+            # Use Streamlit's built-in audio widget (no manual base64/autoplay)
+            st.audio(data, format="audio/wav")
+
         except Exception as e:
             # Final catch-all so UI never crashes
             st.warning(f"Playback error (non-fatal): {e!s}")
 
-    _play_audio(row, autoplay)
+    if do_play:
+        _play_audio(row)
+
 
 
 # =====================
