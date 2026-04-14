@@ -1945,22 +1945,21 @@ with tab3:
             else:
                 ts = ts.drop_duplicates(subset=["t"]).sort_values("t").reset_index(drop=True)
 
-                # ★ FIX: Plotly 6.x compatible layout (titlefont/title dict removed)
+                # ★ FIX: Plotly 6.x — build chart with no string titles in dicts
                 fig = go.Figure()
                 fig.add_trace(go.Scatter(x=ts["t"], y=ts["PH_SoCi"], mode="lines",
-                                         name="SoC (%)", line=dict(color="#22c55e", width=2.5), yaxis="y1"))
+                                         name="SoC (%)", line=dict(color="#22c55e", width=2.5)))
                 fig.add_trace(go.Scatter(x=ts["t"], y=ts["PH_WH"],  mode="lines",
                                          name="Energy (Wh)", line=dict(color="#f59e0b", width=2), yaxis="y2"))
                 fig.update_layout(
-                    title_text="Battery & Energy — last 7 days",
-                    xaxis_title="",
-                    yaxis_title="SoC (%)",
-                    yaxis_range=[0, 105],
-                    yaxis2=dict(title="Wh", overlaying="y", side="right"),
+                    yaxis2=dict(overlaying="y", side="right"),
                     legend=dict(orientation="h", y=-0.12),
                     margin=dict(l=10, r=10, t=50, b=10),
                     hovermode="x unified",
                 )
+                fig.update_layout(title_text="Battery & Energy — last 7 days")
+                fig.update_yaxes(title_text="SoC (%)", range=[0, 105], selector=dict(side="left"))
+                fig.update_yaxes(title_text="Wh", selector=dict(side="right"))
                 st.plotly_chart(fig, use_container_width=True)
 
                 stitched_days = max(1, (ts["t"].max() - ts["t"].min()).days + 1)
