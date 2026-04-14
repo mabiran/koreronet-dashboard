@@ -362,13 +362,19 @@ GDRIVE_FOLDER_ID = ROOT_LOCAL if OFFLINE_DEPLOY else _secret_or_env("GDRIVE_FOLD
 row_top = st.columns([3,2])
 with row_top[0]:
     node = st.selectbox("Active node", NODE_KEYS, index=0, key="node_select_top")
+    # ★ FIX: sync top-bar selector to active_node state
+    if node != st.session_state.get("active_node"):
+        st.session_state["active_node"] = node
 with row_top[1]:
     if st.button("↻ Refresh data", key=k("btn_refresh_drive"), help="Clear caches & re-index Drive/local data"):
         try:
             st.cache_data.clear()
+            # ★ FIX: only clear Drive-related session keys (was nuking welcome state, tab state, etc.)
             for _k in list(st.session_state.keys()):
                 if str(_k).startswith("drive_kids::") or str(_k).startswith("DRIVE_EPOCH"):
                     del st.session_state[_k]
+            # Also reset verify lazy-load so it re-fetches
+            st.session_state.pop("verify_loaded", None)
             st.rerun()
         except Exception as e:
             # ★ Don't catch RerunException here
@@ -425,6 +431,8 @@ def drive_enabled() -> bool:
 # Drive helpers + epoch (freshness)
 # ============================================================================
 
+# ★ FIX: cache list_children — was making 426+ uncached API calls per cold load
+@st.cache_data(ttl=300, max_entries=500, show_spinner=False)
 @_retry()
 def list_children(folder_id: str, max_items: int = 2000) -> List[Dict[str, Any]]:
     drive = get_drive_client()
@@ -701,14 +709,18 @@ def _find_backup_folder(root_folder_id: str) -> Optional[Dict[str, Any]]:
             return k
     return None
 
-def _find_chunk_dirs(snapshot_id: str) -> Dict[str, str]:
-    kids = list_children(snapshot_id, max_items=2000)
+# ★ FIX: accept pre-fetched kids to avoid redundant list_children calls per snapshot
+def _find_chunk_dirs(snapshot_id: str, kids: Optional[List[Dict[str, Any]]] = None) -> Dict[str, str]:
+    if kids is None:
+        kids = list_children(snapshot_id, max_items=2000)
     kn = [k for k in kids if k.get("mimeType")=="application/vnd.google-apps.folder" and "koreronet" in k.get("name","").lower()]
     bn = [k for k in kids if k.get("mimeType")=="application/vnd.google-apps.folder" and "birdnet"   in k.get("name","").lower()]
     return {"KN": (kn[0]["id"] if kn else snapshot_id), "BN": (bn[0]["id"] if bn else snapshot_id)}
 
-def _find_named_in_snapshot(snapshot_id: str, exact_name: str) -> Optional[Dict[str, Any]]:
-    kids = list_children(snapshot_id, max_items=2000)
+# ★ FIX: accept pre-fetched kids to avoid redundant list_children calls
+def _find_named_in_snapshot(snapshot_id: str, exact_name: str, kids: Optional[List[Dict[str, Any]]] = None) -> Optional[Dict[str, Any]]:
+    if kids is None:
+        kids = list_children(snapshot_id, max_items=2000)
     files_only = [f for f in kids if f.get("mimeType") != "application/vnd.google-apps.folder"]
     for f in files_only:
         if f.get("name","").lower() == exact_name.lower():
@@ -742,56 +754,62 @@ def build_master_index_by_snapshot_date(root_folder_id: str, cache_epoch: str, n
              if k.get("mimeType")=="application/vnd.google-apps.folder" and SNAP_RE.match(k.get("name",""))]
     snaps.sort(key=lambda m: m.get("name",""), reverse=True)
 
-    rows: List[Dict[str,Any]] = []
+    frames: List[pd.DataFrame] = []  # ★ FIX: collect DataFrames, not row dicts
     for sn in snaps:
         snap_id, snap_name = sn["id"], sn["name"]
         snap_date = _parse_date_from_snapname(snap_name)
         if not snap_date: continue
 
-        chunk_dirs = _find_chunk_dirs(snap_id)
+        # ★ FIX: single list_children call per snapshot (was 3+ calls)
+        snap_kids = list_children(snap_id, max_items=2000)
+        chunk_dirs = _find_chunk_dirs(snap_id, kids=snap_kids)
+
         if snap_date >= CUTOFF_NEW:
-            kn_meta = _find_named_in_snapshot(snap_id, "koreronet_master.csv")
+            kn_meta = _find_named_in_snapshot(snap_id, "koreronet_master.csv", kids=snap_kids)
             if kn_meta:
                 kn_csv = ensure_csv_cached(kn_meta, subdir=f"snap_{snap_id}/koreronet", cache_epoch=cache_epoch, force=False)
                 try:
                     df = pd.read_csv(kn_csv)
-                    for _, r in df.iterrows():
-                        clip  = str(r.get("Clip","")).strip()
-                        lab   = str(r.get("Label","Unknown"))
-                        conf  = float(r.get("Probability", np.nan))
-                        rows.append({
-                            "Date": snap_date, "Kind": "KN", "Label": lab, "Confidence": conf,
-                            "Start": np.nan, "End": np.nan, "WavBase": "",
-                            "ChunkName": clip, "ChunkDriveFolderId": chunk_dirs["KN"],
-                            "SnapId": snap_id, "SnapName": snap_name,
-                        })
+                    # ★ FIX: vectorized — was iterrows() over 41K rows
+                    df = df.assign(
+                        Date=snap_date, Kind="KN",
+                        Label=df.get("Label", "Unknown").astype(str),
+                        Confidence=pd.to_numeric(df.get("Probability", np.nan), errors="coerce"),
+                        Start=np.nan, End=np.nan, WavBase="",
+                        ChunkName=df.get("Clip", "").astype(str).str.strip(),
+                        ChunkDriveFolderId=chunk_dirs["KN"],
+                        SnapId=snap_id, SnapName=snap_name,
+                    )[["Date","Kind","Label","Confidence","Start","End","WavBase","ChunkName","ChunkDriveFolderId","SnapId","SnapName"]]
+                    frames.append(df)
                 except Exception:
                     pass
 
-            bn_meta = _find_named_in_snapshot(snap_id, "birdnet_master.csv")
+            bn_meta = _find_named_in_snapshot(snap_id, "birdnet_master.csv", kids=snap_kids)
             if bn_meta:
                 bn_csv = ensure_csv_cached(bn_meta, subdir=f"snap_{snap_id}/birdnet", cache_epoch=cache_epoch, force=False)
                 try:
                     df = pd.read_csv(bn_csv)
-                    for _, r in df.iterrows():
-                        clip  = str(r.get("Clip","")).strip()
-                        lab   = str(r.get("Label", r.get("Common name","Unknown")))
-                        conf  = float(r.get("Probability", r.get("Confidence", np.nan)))
-                        rows.append({
-                            "Date": snap_date, "Kind": "BN", "Label": lab, "Confidence": conf,
-                            "Start": np.nan, "End": np.nan, "WavBase": "",
-                            "ChunkName": clip, "ChunkDriveFolderId": chunk_dirs["BN"],
-                            "SnapId": snap_id, "SnapName": snap_name,
-                        })
+                    label_col = "Label" if "Label" in df.columns else ("Common name" if "Common name" in df.columns else None)
+                    conf_col  = "Probability" if "Probability" in df.columns else ("Confidence" if "Confidence" in df.columns else None)
+                    df = df.assign(
+                        Date=snap_date, Kind="BN",
+                        Label=df[label_col].astype(str) if label_col else "Unknown",
+                        Confidence=pd.to_numeric(df[conf_col], errors="coerce") if conf_col else np.nan,
+                        Start=np.nan, End=np.nan, WavBase="",
+                        ChunkName=df.get("Clip", "").astype(str).str.strip(),
+                        ChunkDriveFolderId=chunk_dirs["BN"],
+                        SnapId=snap_id, SnapName=snap_name,
+                    )[["Date","Kind","Label","Confidence","Start","End","WavBase","ChunkName","ChunkDriveFolderId","SnapId","SnapName"]]
+                    frames.append(df)
                 except Exception:
                     pass
         else:
-            root_kids = list_children(snap_id, max_items=2000)
-            files_only = [f for f in root_kids if f.get("mimeType") != "application/vnd.google-apps.folder"]
+            # Legacy format — reuse snap_kids (was calling list_children again)
+            files_only = [f for f in snap_kids if f.get("mimeType") != "application/vnd.google-apps.folder"]
 
             kn_legacy = [f for f in files_only if _match_legacy_master_name(f.get("name",""), "KN")]
             if not kn_legacy:
-                for sf in [f for f in root_kids if f.get("mimeType") == "application/vnd.google-apps.folder"]:
+                for sf in [f for f in snap_kids if f.get("mimeType") == "application/vnd.google-apps.folder"]:
                     cand = [f for f in list_children(sf["id"], max_items=2000)
                             if f.get("mimeType") != "application/vnd.google-apps.folder"
                             and _match_legacy_master_name(f.get("name", ""), "KN")]
@@ -804,25 +822,28 @@ def build_master_index_by_snapshot_date(root_folder_id: str, cache_epoch: str, n
                 kn_csv = ensure_csv_cached(meta, subdir=f"snap_{snap_id}/koreronet", cache_epoch=cache_epoch, force=False)
                 try:
                     df = pd.read_csv(kn_csv)
-                    for _, r in df.iterrows():
-                        wav = os.path.basename(str(r.get("File","")))
-                        start = float(r.get("Start", r.get("Start (s)", np.nan)))
-                        end   = float(r.get("End",   r.get("End (s)",   np.nan)))
-                        lab   = str(r.get("Label","Unknown"))
-                        conf  = float(r.get("Confidence", np.nan))
-                        rows.append({
-                            "Date": snap_date, "Kind": "KN", "Label": lab, "Confidence": conf,
-                            "Start": start, "End": end, "WavBase": wav,
-                            "ChunkName": _compose_chunk_name("kn", wav, start, end, lab, conf),
-                            "ChunkDriveFolderId": chunk_dirs["KN"],
-                            "SnapId": snap_id, "SnapName": snap_name,
-                        })
+                    # ★ FIX: vectorized legacy KN
+                    wav_col = df.get("File", pd.Series(dtype=str)).astype(str).apply(os.path.basename)
+                    s_col = pd.to_numeric(df.get("Start", df.get("Start (s)", np.nan)), errors="coerce")
+                    e_col = pd.to_numeric(df.get("End",   df.get("End (s)",   np.nan)), errors="coerce")
+                    lab_col = df.get("Label", "Unknown").astype(str)
+                    conf_col = pd.to_numeric(df.get("Confidence", np.nan), errors="coerce")
+                    chunk_names = [_compose_chunk_name("kn", w, s, e, l, c) for w, s, e, l, c
+                                   in zip(wav_col, s_col, e_col, lab_col, conf_col)]
+                    df = pd.DataFrame({
+                        "Date": snap_date, "Kind": "KN", "Label": lab_col,
+                        "Confidence": conf_col, "Start": s_col, "End": e_col,
+                        "WavBase": wav_col, "ChunkName": chunk_names,
+                        "ChunkDriveFolderId": chunk_dirs["KN"],
+                        "SnapId": snap_id, "SnapName": snap_name,
+                    })
+                    frames.append(df)
                 except Exception:
                     pass
 
             bn_legacy = [f for f in files_only if _match_legacy_master_name(f.get("name",""), "BN")]
             if not bn_legacy:
-                for sf in [f for f in root_kids if f.get("mimeType") == "application/vnd.google-apps.folder"]:
+                for sf in [f for f in snap_kids if f.get("mimeType") == "application/vnd.google-apps.folder"]:
                     cand = [f for f in list_children(sf["id"], max_items=2000)
                             if f.get("mimeType") != "application/vnd.google-apps.folder"
                             and _match_legacy_master_name(f.get("name",""), "BN")]
@@ -833,28 +854,31 @@ def build_master_index_by_snapshot_date(root_folder_id: str, cache_epoch: str, n
                 bn_csv = ensure_csv_cached(meta, subdir=f"snap_{snap_id}/birdnet", cache_epoch=cache_epoch, force=False)
                 try:
                     df = pd.read_csv(bn_csv)
-                    for _, r in df.iterrows():
-                        wav = os.path.basename(str(r.get("File","")))
-                        start = float(r.get("Start (s)", r.get("Start", np.nan)))
-                        end   = float(r.get("End (s)",   r.get("End",   np.nan)))
-                        lab   = str(r.get("Common name", r.get("Label","Unknown")))
-                        conf  = float(r.get("Confidence", np.nan))
-                        rows.append({
-                            "Date": snap_date, "Kind": "BN", "Label": lab, "Confidence": conf,
-                            "Start": start, "End": end, "WavBase": wav,
-                            "ChunkName": _compose_chunk_name("bn", wav, start, end, lab, conf),
-                            "ChunkDriveFolderId": chunk_dirs["BN"],
-                            "SnapId": snap_id, "SnapName": snap_name,
-                        })
+                    # ★ FIX: vectorized legacy BN
+                    wav_col = df.get("File", pd.Series(dtype=str)).astype(str).apply(os.path.basename)
+                    s_col = pd.to_numeric(df.get("Start (s)", df.get("Start", np.nan)), errors="coerce")
+                    e_col = pd.to_numeric(df.get("End (s)",   df.get("End",   np.nan)), errors="coerce")
+                    lab_col = df.get("Common name", df.get("Label", "Unknown")).astype(str)
+                    conf_col = pd.to_numeric(df.get("Confidence", np.nan), errors="coerce")
+                    chunk_names = [_compose_chunk_name("bn", w, s, e, l, c) for w, s, e, l, c
+                                   in zip(wav_col, s_col, e_col, lab_col, conf_col)]
+                    df = pd.DataFrame({
+                        "Date": snap_date, "Kind": "BN", "Label": lab_col,
+                        "Confidence": conf_col, "Start": s_col, "End": e_col,
+                        "WavBase": wav_col, "ChunkName": chunk_names,
+                        "ChunkDriveFolderId": chunk_dirs["BN"],
+                        "SnapId": snap_id, "SnapName": snap_name,
+                    })
+                    frames.append(df)
                 except Exception:
                     pass
 
-    if not rows:
+    if not frames:
         return pd.DataFrame(columns=[
             "Date","Kind","Label","Confidence","Start","End","WavBase","ChunkName",
             "ChunkDriveFolderId","SnapId","SnapName"
         ])
-    out = pd.DataFrame(rows)
+    out = pd.concat(frames, ignore_index=True)  # ★ FIX: concat DataFrames, not build from row dicts
     out.sort_values(["Date","Kind","Label"], ascending=[False, True, True], inplace=True)
     out.reset_index(drop=True, inplace=True)
     return out
@@ -1173,27 +1197,14 @@ def _latest_root_summary(root_id_or_path: str, live: bool) -> Tuple[Optional[str
 
     return mode_label, chosen, merged
 
-def _render_welcome_overlay():
-    if st.session_state.get("__welcome_done__", False):
-        return
-    with st.spinner("Summarising latest detections…"):
-        mode, chosen_date, df = _latest_root_summary(GDRIVE_FOLDER_ID, False)
-    overlay = st.empty()
-    with overlay.container():
-        st.markdown('<div class="overlay-card">', unsafe_allow_html=True)
-        st.markdown('<div class="overlay-title">KōreroNET</div>', unsafe_allow_html=True)
-
-        # Top Continue CTA
-        st.markdown('<div class="overlay-cta-top">', unsafe_allow_html=True)
-        cta_top = st.button("Continue →", type="primary", key=k("welcome_continue_top"))
-        if cta_top:
-            st.session_state["__welcome_done__"] = True
-            st.rerun()
-        st.markdown('</div>', unsafe_allow_html=True)
-        st.markdown('<div class="overlay-cta-hint">Click <b>Continue</b> to enter the dashboard.</div>', unsafe_allow_html=True)
+# ★ FIX: non-blocking welcome — tabs always render below this.
+#   Was blocking with st.stop() until user clicked "Continue →".
+def _render_welcome_section():
+    first_visit = not st.session_state.get("__welcome_done__", False)
+    with st.expander("🐦 **KōreroNET** — About this platform", expanded=first_visit):
+        st.session_state["__welcome_done__"] = True
 
         # Technology highlights
-        st.markdown('<div class="overlay-sub">Our Technology Highlights</div>', unsafe_allow_html=True)
         features: List[Tuple[str, str]] = [
             ('🔊', 'Bioacoustic monitoring of all vocal species in New Zealand wildlife.'),
             ('🎧', 'Full-spectrum recording: ultrasonic and audible ranges.'),
@@ -1211,39 +1222,30 @@ def _render_welcome_overlay():
             feature_html += f'<div class="feature-card"><div class="feature-icon">{icon}</div><div class="feature-text">{text}</div></div>'
         feature_html += '</div>'
         st.markdown(feature_html, unsafe_allow_html=True)
-        
-        st.markdown('<hr style="border:0; border-top:1px solid rgba(255,255,255,.06); margin:1.5rem 0;">', unsafe_allow_html=True)
-        
-        # Latest field summary
-        st.markdown('<div class="overlay-sub">Latest Field Summary</div>', unsafe_allow_html=True)
-        if df is None or df.empty or chosen_date is None:
-            st.markdown('<div class="overlay-sub">No parsable detections found in the most recent root CSVs.</div>', unsafe_allow_html=True)
-        else:
-            counts = df["Label"].astype(str).value_counts()
-            top = [(lbl, int(counts[lbl])) for lbl in counts.index[:3]]
-            nice_day = _human_day(chosen_date)
-            sentence = f"{nice_day} we detected {_join_top(top)}."
-            st.markdown(f'<div class="overlay-sub">{sentence}</div>', unsafe_allow_html=True)
-            total = int(counts.sum())
-            uniq  = int(counts.shape[0])
-            st.markdown(f"""
-                <div class="overlay-pill">Mode: {mode or '—'}</div>
-                <div class="overlay-pill">Date: {chosen_date.isoformat() if chosen_date else '—'}</div>
-                <div class="overlay-pill">Detections: {total:,}</div>
-                <div class="overlay-pill">Species: {uniq:,}</div>
-            """, unsafe_allow_html=True)
-        
-        c1, c2 = st.columns([1,5])
-        with c1:
-            if st.button("Continue →", type="primary", key=k("welcome_continue")):
-                st.session_state["__welcome_done__"] = True
-                st.rerun()
 
-        st.markdown('</div>', unsafe_allow_html=True)
-    st.stop()
+        # Latest field summary (cached — no blocking spinner)
+        try:
+            mode, chosen_date, df = _latest_root_summary(GDRIVE_FOLDER_ID, False)
+            if df is not None and not df.empty and chosen_date is not None:
+                counts = df["Label"].astype(str).value_counts()
+                top = [(lbl, int(counts[lbl])) for lbl in counts.index[:3]]
+                nice_day = _human_day(chosen_date)
+                sentence = f"{nice_day} we detected {_join_top(top)}."
+                total = int(counts.sum())
+                uniq  = int(counts.shape[0])
+                st.markdown(f"""
+                    <hr style="border:0; border-top:1px solid rgba(255,255,255,.06); margin:1rem 0;">
+                    <div class="overlay-sub">{sentence}</div>
+                    <div class="overlay-pill">Mode: {mode or '—'}</div>
+                    <div class="overlay-pill">Date: {chosen_date.isoformat()}</div>
+                    <div class="overlay-pill">Detections: {total:,}</div>
+                    <div class="overlay-pill">Species: {uniq:,}</div>
+                """, unsafe_allow_html=True)
+        except Exception:
+            pass  # non-blocking: if summary fails, just show the features
 
-# Show the overlay once per session (after splash, before tabs)
-_render_welcome_overlay()
+# Show welcome section (non-blocking — tabs render below)
+_render_welcome_section()
 
 # ★ REVISED: added ttl + max_entries
 @st.cache_data(ttl=300, max_entries=10, show_spinner=False)
@@ -1288,19 +1290,8 @@ with tab_nodes:
     if "active_node" not in st.session_state:
         st.session_state["active_node"] = default_active
 
-    node_choice = st.selectbox(
-        "Active node",
-        NODE_KEYS,
-        index=NODE_KEYS.index(st.session_state["active_node"]) if st.session_state["active_node"] in NODE_KEYS else 0,
-        key=k("node_select_choice"),
-    )
-
-    set_col1, set_col2 = st.columns([1, 4])
-    with set_col1:
-        if st.button("Set as active node", key=k("apply_node_box")):
-            st.session_state["active_node"] = node_choice
-            st.success(f"Active node set to: {node_choice}")
-            st.rerun()
+    # ★ FIX: removed duplicate selector. Use the "Active node" dropdown at the top of the page.
+    st.markdown('<p class="kn-muted">Change the active node using the dropdown at the top of the page.</p>', unsafe_allow_html=True)
 
     try:
         _center = _df_nodes[_df_nodes["key"] == st.session_state["active_node"]][["lat", "lon"]].iloc[0].to_dict()
@@ -1328,8 +1319,8 @@ with tab_nodes:
                                     tooltip=f"<b>{r['name']}</b><br>{r['desc']}").add_to(m)
             st_folium(m, width=950, height=520, returned_objects=[])
             rendered = True
-        except Exception:
-            pass
+        except Exception as _e:
+            pass  # ★ folium not installed, try pydeck next
 
         if not rendered:
             try:
@@ -1347,8 +1338,8 @@ with tab_nodes:
                     use_container_width=True,
                 )
                 rendered = True
-            except Exception:
-                pass
+            except Exception as _e:
+                st.caption("⚠️ Interactive map unavailable — using static fallback.")
 
         if not rendered:
             import plotly.graph_objects as go
@@ -1427,7 +1418,7 @@ with tab1:
 
     if not options:
         st.warning(f"No available dates for {src}.")
-        st.stop()
+        pass  # ★ FIX: removed st.stop() wall
 
     # Snap to nearest available date
     if d not in set(options):
@@ -1508,488 +1499,506 @@ with tab1:
 # TAB 2 — Verify (snapshot date)
 # ================================
 with tab_verify:
-    st.markdown("#### Verify recordings")
-    st.markdown('<p class="kn-muted">Browse and listen to audio chunks from backup snapshots. Select a species and navigate through detections.</p>', unsafe_allow_html=True)
+    def _render_verify_tab():  # ★ FIX: function wrapper so return replaces st.stop()
+        st.markdown("#### Verify recordings")
+        st.markdown('<p class="kn-muted">Browse and listen to audio chunks from backup snapshots. Select a species and navigate through detections.</p>', unsafe_allow_html=True)
 
-    if not drive_enabled():
-        st.error("Google Drive is not configured. Add credentials in Streamlit secrets to enable this tab.")
-        st.stop()
+        if not drive_enabled():
+            st.error("Google Drive is not configured. Add credentials in Streamlit secrets to enable this tab.")
+            return  # ★ was st.stop()
 
-    # --- Small cooldown to avoid hammering audio playback ---
-    NAV_COOLDOWN_SECONDS = 0.4
-    if "tab2_last_play_ts" not in st.session_state:
-        st.session_state["tab2_last_play_ts"] = 0.0
+        # --- Small cooldown to avoid hammering audio playback ---
+        NAV_COOLDOWN_SECONDS = 0.4
+        if "tab2_last_play_ts" not in st.session_state:
+            st.session_state["tab2_last_play_ts"] = 0.0
 
-    # ★ REVISED: use st.status for progressive loading
-    with st.status("Indexing master CSVs by snapshot date…", expanded=False) as idx_status:
-        cache_epoch = st.session_state.get("DRIVE_EPOCH", "0")
-        try:
-            master = build_master_index_by_snapshot_date(
-                GDRIVE_FOLDER_ID, cache_epoch=cache_epoch, nocache="stable"
-            )
-            idx_status.update(
-                label=f"Indexed {len(master):,} detections across {master['Date'].nunique() if not master.empty else 0} dates",
-                state="complete",
-            )
-        except Exception as e:
-            if type(e).__name__ in ("RerunException", "StopException", "RerunData"):
-                raise
-            master = pd.DataFrame()
-            idx_status.update(label=f"Indexing failed: {e!s}", state="error")
+        # ★ FIX: lazy-load — don't index 41K detections until user asks
+        if "verify_loaded" not in st.session_state:
+            st.session_state["verify_loaded"] = False
 
-    if master.empty or master.shape[0] == 0:
-        st.warning("No master CSVs found in any snapshot.")
-        st.stop()
+        if not st.session_state["verify_loaded"]:
+            st.info("This tab indexes all backup snapshots from Drive (~142 dates, ~41K detections). Click below to load.")
+            if st.button("Load verification data", type="primary", key=k("verify_load_btn")):
+                st.session_state["verify_loaded"] = True
+                st.rerun()
+            return
 
-    colA, colB = st.columns([2, 1])
-    with colA:
-        src_mode_v = st.selectbox(
-            "Source",
-            ["KōreroNET (KN)", "BirdNET (BN)", "Combined"],
-            index=0,
-            key=k("tab2_src"),
-        )
-    with colB:
-        min_conf_v = st.slider(
-            "Min confidence", 0.0, 1.0, 0.90, 0.01, key=k("tab2_min_conf")
-        )
-
-    try:
-        if src_mode_v == "KōreroNET (KN)":
-            pool = master[master["Kind"] == "KN"]
-        elif src_mode_v == "BirdNET (BN)":
-            pool = master[master["Kind"] == "BN"]
-        else:
-            pool = master
-        pool = pool[
-            pd.to_numeric(pool["Confidence"], errors="coerce")
-            >= float(min_conf_v)
-        ]
-    except Exception as e:
-        if type(e).__name__ in ("RerunException", "StopException", "RerunData"):
-            raise
-        pool = pd.DataFrame()
-        st.warning(f"Filter error (non-fatal): {e!s}")
-
-    if pool.empty:
-        st.info("No rows above the selected confidence.")
-        st.stop()
-
-    try:
-        avail_days = sorted(pool["Date"].unique())
-    except Exception:
-        avail_days = []
-    if not avail_days:
-        st.info("No detections for any date with current filters.")
-        st.stop()
-
-    day_default = avail_days[-1]
-    day_pick = st.date_input(
-        "Day",
-        value=day_default,
-        min_value=avail_days[0],
-        max_value=avail_days[-1],
-        key=k("tab2_day"),
-    )
-
-    day_df = pool[pool["Date"] == day_pick]
-    if day_df.empty:
-        st.warning("No detections for the chosen date.")
-        st.stop()
-
-    counts = day_df.groupby("Label").size().sort_values(ascending=False)
-    species_list = list(counts.index)
-
-    sel_key = f"verify_species_sel::{day_pick.isoformat()}::{src_mode_v}"
-    prev_species = st.session_state.get(sel_key, None)
-    if prev_species not in species_list:
-        prev_species = species_list[0]
-        st.session_state[sel_key] = prev_species
-
-    species = st.selectbox(
-        "Species",
-        options=species_list,
-        index=species_list.index(prev_species),
-        format_func=lambda s: f"{s} — {counts[s]:,} detections",
-        key=f"verify_species::{day_pick.isoformat()}::{src_mode_v}",
-    )
-    st.session_state[sel_key] = species
-
-    playlist = (
-        day_df[day_df["Label"] == species]
-        .sort_values(["Kind", "ChunkName"])
-        .reset_index(drop=True)
-    )
-
-    pkey = f"v2_playlist_sig::{day_pick.isoformat()}::{src_mode_v}::{species}"
-    sig = (len(playlist), tuple(playlist["ChunkName"].head(3)))
-    if st.session_state.get(pkey) != sig:
-        st.session_state[pkey] = sig
-        st.session_state[f"v2_idx::{pkey}"] = 0
-
-    idx_key = f"v2_idx::{pkey}"
-    idx = int(st.session_state.get(idx_key, 0)) % max(1, len(playlist))
-
-    # Navigation row
-    col1, col2, col3, col4 = st.columns([1, 1, 1, 6])
-    do_play = False
-
-    if playlist.empty:
-        st.info("No clips for this species and day.")
-        st.stop()
-
-    with col1:
-        if st.button("⏮ Prev", key=k("tab2_prev"), use_container_width=True):
-            idx = (idx - 1) % len(playlist)
-    with col2:
-        if st.button("▶ Play", key=k("tab2_play"), type="primary", use_container_width=True):
-            now_ts = time.time()
-            if now_ts - st.session_state["tab2_last_play_ts"] >= NAV_COOLDOWN_SECONDS:
-                st.session_state["tab2_last_play_ts"] = now_ts
-                do_play = True
-            else:
-                st.info("Just a moment between plays to keep the server happy.")
-    with col3:
-        if st.button("⏭ Next", key=k("tab2_next"), use_container_width=True):
-            idx = (idx + 1) % len(playlist)
-    with col4:
-        st.markdown(f'<p class="kn-muted" style="padding-top:.6rem">{idx + 1} / {len(playlist)}</p>', unsafe_allow_html=True)
-
-    st.session_state[idx_key] = idx
-
-    row = playlist.iloc[idx]
-    try:
-        conf_val = float(row["Confidence"])
-        conf_str = f"{conf_val:.3f}"
-    except Exception:
-        conf_str = "n/a"
-
-    # ★ REVISED: styled metadata card
-    st.markdown(f"""
-    <div class="kn-player">
-        <div class="kn-player-meta">
-            <strong>Chunk:</strong> {row['ChunkName']}<br>
-            <strong>Date:</strong> {row['Date']} &nbsp;·&nbsp;
-            <strong>Source:</strong> {row['Kind']} &nbsp;·&nbsp;
-            <strong>Confidence:</strong> {conf_str}
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # Safe audio fetch with retry
-    @_retry()
-    def _safe_chunk_cached(chunk_name: str, folder_id: str, subdir: str) -> Optional[Path]:
-        return ensure_chunk_cached(chunk_name, folder_id, subdir=subdir, force=False)
-
-    def _play_audio(row_: pd.Series):
-        try:
-            chunk_name = str(row_.get("ChunkName", "") or "")
-            folder_id = str(row_.get("ChunkDriveFolderId", "") or "")
-            kind = str(row_.get("Kind", "UNK") or "")
-            if not chunk_name or not folder_id:
-                st.warning("No chunk mapping available.")
-                return
-            subdir = f"{kind}"
-            with st.spinner("Fetching audio…"):
-                cached = _safe_chunk_cached(chunk_name, folder_id, subdir=subdir)
-            if not cached or not cached.exists():
-                st.warning("Audio chunk not found in Drive folder.")
-                return
+        with st.status("Indexing master CSVs by snapshot date…", expanded=False) as idx_status:
+            cache_epoch = st.session_state.get("DRIVE_EPOCH", "0")
             try:
-                if cached.stat().st_size > 30 * 1024 * 1024:  # 30 MB sanity cap
-                    st.warning("Audio file too large to preview safely.")
-                    return
-                with open(cached, "rb") as f:
-                    data = f.read()
-            except MemoryError:
-                st.warning("Not enough memory to load audio preview.")
-                return
+                master = build_master_index_by_snapshot_date(
+                    GDRIVE_FOLDER_ID, cache_epoch=cache_epoch, nocache="stable"
+                )
+                idx_status.update(
+                    label=f"Indexed {len(master):,} detections across {master['Date'].nunique() if not master.empty else 0} dates",
+                    state="complete",
+                )
             except Exception as e:
                 if type(e).__name__ in ("RerunException", "StopException", "RerunData"):
                     raise
-                st.warning(f"Cannot open audio chunk: {e!s}")
-                return
+                master = pd.DataFrame()
+                idx_status.update(label=f"Indexing failed: {e!s}", state="error")
 
-            st.audio(data, format="audio/wav")
+        if master.empty or master.shape[0] == 0:
+            st.warning("No master CSVs found in any snapshot.")
+            return  # ★ was st.stop()
 
+        colA, colB = st.columns([2, 1])
+        with colA:
+            src_mode_v = st.selectbox(
+                "Source",
+                ["KōreroNET (KN)", "BirdNET (BN)", "Combined"],
+                index=0,
+                key=k("tab2_src"),
+            )
+        with colB:
+            min_conf_v = st.slider(
+                "Min confidence", 0.0, 1.0, 0.90, 0.01, key=k("tab2_min_conf")
+            )
+
+        try:
+            if src_mode_v == "KōreroNET (KN)":
+                pool = master[master["Kind"] == "KN"]
+            elif src_mode_v == "BirdNET (BN)":
+                pool = master[master["Kind"] == "BN"]
+            else:
+                pool = master
+            pool = pool[
+                pd.to_numeric(pool["Confidence"], errors="coerce")
+                >= float(min_conf_v)
+            ]
         except Exception as e:
             if type(e).__name__ in ("RerunException", "StopException", "RerunData"):
                 raise
-            st.warning(f"Playback error (non-fatal): {e!s}")
+            pool = pd.DataFrame()
+            st.warning(f"Filter error (non-fatal): {e!s}")
 
-    if do_play:
-        _play_audio(row)
+        if pool.empty:
+            st.info("No rows above the selected confidence.")
+            return  # ★ was st.stop()
 
+        try:
+            avail_days = sorted(pool["Date"].unique())
+        except Exception:
+            avail_days = []
+        if not avail_days:
+            st.info("No detections for any date with current filters.")
+            return  # ★ was st.stop()
+
+        day_default = avail_days[-1]
+        day_pick = st.date_input(
+            "Day",
+            value=day_default,
+            min_value=avail_days[0],
+            max_value=avail_days[-1],
+            key=k("tab2_day"),
+        )
+
+        day_df = pool[pool["Date"] == day_pick]
+        if day_df.empty:
+            st.warning("No detections for the chosen date.")
+            return  # ★ was st.stop()
+
+        counts = day_df.groupby("Label").size().sort_values(ascending=False)
+        species_list = list(counts.index)
+
+        sel_key = f"verify_species_sel::{day_pick.isoformat()}::{src_mode_v}"
+        prev_species = st.session_state.get(sel_key, None)
+        if prev_species not in species_list:
+            prev_species = species_list[0]
+            st.session_state[sel_key] = prev_species
+
+        species = st.selectbox(
+            "Species",
+            options=species_list,
+            index=species_list.index(prev_species),
+            format_func=lambda s: f"{s} — {counts[s]:,} detections",
+            key=f"verify_species::{day_pick.isoformat()}::{src_mode_v}",
+        )
+        st.session_state[sel_key] = species
+
+        playlist = (
+            day_df[day_df["Label"] == species]
+            .sort_values(["Kind", "ChunkName"])
+            .reset_index(drop=True)
+        )
+
+        pkey = f"v2_playlist_sig::{day_pick.isoformat()}::{src_mode_v}::{species}"
+        sig = (len(playlist), tuple(playlist["ChunkName"].head(3)))
+        if st.session_state.get(pkey) != sig:
+            st.session_state[pkey] = sig
+            st.session_state[f"v2_idx::{pkey}"] = 0
+
+        idx_key = f"v2_idx::{pkey}"
+        idx = int(st.session_state.get(idx_key, 0)) % max(1, len(playlist))
+
+        # Navigation row
+        col1, col2, col3, col4 = st.columns([1, 1, 1, 6])
+        do_play = False
+
+        if playlist.empty:
+            st.info("No clips for this species and day.")
+            return  # ★ was st.stop()
+
+        with col1:
+            if st.button("⏮ Prev", key=k("tab2_prev"), use_container_width=True):
+                idx = (idx - 1) % len(playlist)
+        with col2:
+            if st.button("▶ Play", key=k("tab2_play"), type="primary", use_container_width=True):
+                now_ts = time.time()
+                if now_ts - st.session_state["tab2_last_play_ts"] >= NAV_COOLDOWN_SECONDS:
+                    st.session_state["tab2_last_play_ts"] = now_ts
+                    do_play = True
+                else:
+                    st.info("Just a moment between plays to keep the server happy.")
+        with col3:
+            if st.button("⏭ Next", key=k("tab2_next"), use_container_width=True):
+                idx = (idx + 1) % len(playlist)
+        with col4:
+            st.markdown(f'<p class="kn-muted" style="padding-top:.6rem">{idx + 1} / {len(playlist)}</p>', unsafe_allow_html=True)
+
+        st.session_state[idx_key] = idx
+
+        row = playlist.iloc[idx]
+        try:
+            conf_val = float(row["Confidence"])
+            conf_str = f"{conf_val:.3f}"
+        except Exception:
+            conf_str = "n/a"
+
+        # ★ REVISED: styled metadata card
+        st.markdown(f"""
+        <div class="kn-player">
+            <div class="kn-player-meta">
+                <strong>Chunk:</strong> {row['ChunkName']}<br>
+                <strong>Date:</strong> {row['Date']} &nbsp;·&nbsp;
+                <strong>Source:</strong> {row['Kind']} &nbsp;·&nbsp;
+                <strong>Confidence:</strong> {conf_str}
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # Safe audio fetch with retry
+        @_retry()
+        def _safe_chunk_cached(chunk_name: str, folder_id: str, subdir: str) -> Optional[Path]:
+            return ensure_chunk_cached(chunk_name, folder_id, subdir=subdir, force=False)
+
+        def _play_audio(row_: pd.Series):
+            try:
+                chunk_name = str(row_.get("ChunkName", "") or "")
+                folder_id = str(row_.get("ChunkDriveFolderId", "") or "")
+                kind = str(row_.get("Kind", "UNK") or "")
+                if not chunk_name or not folder_id:
+                    st.warning("No chunk mapping available.")
+                    return
+                subdir = f"{kind}"
+                with st.spinner("Fetching audio…"):
+                    cached = _safe_chunk_cached(chunk_name, folder_id, subdir=subdir)
+                if not cached or not cached.exists():
+                    st.warning("Audio chunk not found in Drive folder.")
+                    return
+                try:
+                    if cached.stat().st_size > 30 * 1024 * 1024:  # 30 MB sanity cap
+                        st.warning("Audio file too large to preview safely.")
+                        return
+                    with open(cached, "rb") as f:
+                        data = f.read()
+                except MemoryError:
+                    st.warning("Not enough memory to load audio preview.")
+                    return
+                except Exception as e:
+                    if type(e).__name__ in ("RerunException", "StopException", "RerunData"):
+                        raise
+                    st.warning(f"Cannot open audio chunk: {e!s}")
+                    return
+
+                st.audio(data, format="audio/wav")
+
+            except Exception as e:
+                if type(e).__name__ in ("RerunException", "StopException", "RerunData"):
+                    raise
+                st.warning(f"Playback error (non-fatal): {e!s}")
+
+        if do_play:
+            _play_audio(row)
+
+
+    _render_verify_tab()
 
 # =====================
 # TAB 3 — Power graph
 # =====================
 with tab3:
-    st.markdown("#### Node power history")
-    st.markdown('<p class="kn-muted">State of Charge and energy over the last 7 days, stitched from hourly power logs.</p>', unsafe_allow_html=True)
+    def _render_power_tab():  # ★ FIX: function wrapper
+        st.markdown("#### Node power history")
+        st.markdown('<p class="kn-muted">State of Charge and energy over the last 7 days, stitched from hourly power logs.</p>', unsafe_allow_html=True)
 
-    if not drive_enabled():
-        st.error("Google Drive is not configured in secrets."); st.stop()
+        if not drive_enabled():
+            st.error("Google Drive is not configured in secrets."); return  # ★ was st.stop()
 
-    def find_subfolder_by_name(root_id: str, name_ci: str) -> Optional[Dict[str, Any]]:
-        kids = list_children(root_id, max_items=2000)
-        for k in kids:
-            if k.get("mimeType")=="application/vnd.google-apps.folder" and k.get("name","").lower()==name_ci.lower():
-                return k
-        return None
+        def find_subfolder_by_name(root_id: str, name_ci: str) -> Optional[Dict[str, Any]]:
+            kids = list_children(root_id, max_items=2000)
+            for k in kids:
+                if k.get("mimeType")=="application/vnd.google-apps.folder" and k.get("name","").lower()==name_ci.lower():
+                    return k
+            return None
 
-    logs_folder = find_subfolder_by_name(GDRIVE_FOLDER_ID, "Power logs")
-    if not logs_folder:
-        st.warning("Could not find 'Power logs' folder under the Drive root.")
-        st.stop()
+        logs_folder = find_subfolder_by_name(GDRIVE_FOLDER_ID, "Power logs")
+        if not logs_folder:
+            st.warning("Could not find 'Power logs' folder under the Drive root.")
+            return  # ★ was st.stop()
 
-    LOG_RE = re.compile(r"^power_history_(\d{8})_(\d{6})\.log$", re.IGNORECASE)
+        LOG_RE = re.compile(r"^power_history_(\d{8})_(\d{6})\.log$", re.IGNORECASE)
 
-    # ★ REVISED: added ttl + max_entries
-    @st.cache_data(ttl=300, max_entries=10, show_spinner=True)
-    def list_power_logs(folder_id: str, cache_epoch: str, nocache: str = "stable") -> List[Dict[str, Any]]:
-        kids = list_children(folder_id, max_items=2000)
-        files = [k for k in kids if k.get("mimeType") != "application/vnd.google-apps.folder" and LOG_RE.match(k.get("name",""))]
-        files.sort(key=lambda m: m.get("name",""), reverse=True)
-        return files
+        # ★ REVISED: added ttl + max_entries
+        @st.cache_data(ttl=300, max_entries=10, show_spinner=True)
+        def list_power_logs(folder_id: str, cache_epoch: str, nocache: str = "stable") -> List[Dict[str, Any]]:
+            kids = list_children(folder_id, max_items=2000)
+            files = [k for k in kids if k.get("mimeType") != "application/vnd.google-apps.folder" and LOG_RE.match(k.get("name",""))]
+            files.sort(key=lambda m: m.get("name",""), reverse=True)
+            return files
 
-    @st.cache_data(ttl=300, max_entries=10, show_spinner=False)
-    def ensure_log_cached(meta: Dict[str, Any], force: bool = False) -> Path:
-        local_path = POWER_CACHE / meta["name"]
-        return download_to(local_path, meta["id"], force=force)
+        @st.cache_data(ttl=300, max_entries=10, show_spinner=False)
+        def ensure_log_cached(meta: Dict[str, Any], force: bool = False) -> Path:
+            local_path = POWER_CACHE / meta["name"]
+            return download_to(local_path, meta["id"], force=force)
 
-    def _parse_float_list(line: str) -> List[float]:
-        try:
-            payload = line.split(",", 1)[1]
-        except Exception:
-            return []
-        vals = []
-        for tok in payload.strip().split(","):
-            tok = tok.strip().rstrip(".")
+        def _parse_float_list(line: str) -> List[float]:
             try:
-                vals.append(float(tok))
+                payload = line.split(",", 1)[1]
             except Exception:
-                pass
-        return vals
+                return []
+            vals = []
+            for tok in payload.strip().split(","):
+                tok = tok.strip().rstrip(".")
+                try:
+                    vals.append(float(tok))
+                except Exception:
+                    pass
+            return vals
 
-    def parse_power_log(path: Path) -> Optional[pd.DataFrame]:
-        try:
-            text = path.read_text(encoding="utf-8", errors="ignore")
-        except Exception:
-            return None
-        lines = [l.strip() for l in text.splitlines() if l.strip()]
-        if not lines: return None
+        def parse_power_log(path: Path) -> Optional[pd.DataFrame]:
+            try:
+                text = path.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                return None
+            lines = [l.strip() for l in text.splitlines() if l.strip()]
+            if not lines: return None
 
-        try:
-            head_dt = datetime.strptime(lines[0], "%Y-%m-%d %H:%M:%S")
-        except Exception:
-            head_dt = None
-            for l in lines[:3]:
-                m = re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", l)
-                if m:
-                    try:
-                        head_dt = datetime.strptime(m.group(0), "%Y-%m-%d %H:%M:%S")
+            try:
+                head_dt = datetime.strptime(lines[0], "%Y-%m-%d %H:%M:%S")
+            except Exception:
+                head_dt = None
+                for l in lines[:3]:
+                    m = re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", l)
+                    if m:
+                        try:
+                            head_dt = datetime.strptime(m.group(0), "%Y-%m-%d %H:%M:%S")
+                            break
+                        except Exception:
+                            pass
+            if head_dt is None:
+                return None
+
+            wh_line   = next((l for l in lines if l.upper().startswith("PH_WH")),   "")
+            mah_line  = next((l for l in lines if l.upper().startswith("PH_MAH")),  "")
+            soci_line = next((l for l in lines if l.upper().startswith("PH_SOCI")), "")
+            socv_line = next((l for l in lines if l.upper().startswith("PH_SOCV")), "")
+
+            WH   = _parse_float_list(wh_line)
+            mAh  = _parse_float_list(mah_line)
+            SoCi = _parse_float_list(soci_line)
+            SoCv = _parse_float_list(socv_line)
+
+            L = max(len(WH), len(mAh), len(SoCi), len(SoCv))
+            if L == 0: return None
+
+            def _pad_left(arr: List[float], n: int) -> List[float]:
+                return [np.nan]*(n-len(arr)) + arr if len(arr) < n else arr[:n]
+
+            WH   = _pad_left(WH,   L)
+            mAh  = _pad_left(mAh,  L)
+            SoCi = _pad_left(SoCi, L)
+            SoCv = _pad_left(SoCv, L)
+
+            times = [head_dt - timedelta(hours=(L-1 - i)) for i in range(L)]
+            df = pd.DataFrame({"t": times, "PH_WH": WH, "PH_mAh": mAh, "PH_SoCi": SoCi, "PH_SoCv": SoCv})
+
+            eps = 1e-9
+            all_zero_mask = (
+                (np.abs(df["PH_WH"])   < eps) &
+                (np.abs(df["PH_mAh"])  < eps) &
+                (np.abs(df["PH_SoCi"]) < eps) &
+                (np.abs(df["PH_SoCv"]) < eps)
+            )
+            df = df.loc[~all_zero_mask].reset_index(drop=True)
+            return df
+
+        cache_epoch = st.session_state.get("DRIVE_EPOCH", "0")
+        if st.button("Load power data", type="primary", key=k("tab3_show_btn")):
+            # ★ REVISED: use st.status for progressive feedback
+            with st.status("Building power time-series…", expanded=True) as pwr_status:
+                files = list_power_logs(logs_folder["id"], cache_epoch=cache_epoch)
+
+                window_days = 7
+                cutoff = datetime.now() - timedelta(days=window_days)
+
+                frames: List[pd.DataFrame] = []
+                for meta in files:
+                    local = ensure_log_cached(meta, force=False)
+                    df = parse_power_log(local)
+                    if df is None or df.empty:
+                        continue
+                    df = df[df["t"] >= cutoff]
+                    if df.empty:
                         break
-                    except Exception:
-                        pass
-        if head_dt is None:
-            return None
+                    frames.append(df)
 
-        wh_line   = next((l for l in lines if l.upper().startswith("PH_WH")),   "")
-        mah_line  = next((l for l in lines if l.upper().startswith("PH_MAH")),  "")
-        soci_line = next((l for l in lines if l.upper().startswith("PH_SOCI")), "")
-        socv_line = next((l for l in lines if l.upper().startswith("PH_SOCV")), "")
+                ts = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(
+                    columns=["t","PH_WH","PH_mAh","PH_SoCi","PH_SoCv"]
+                )
+                pwr_status.update(label=f"Loaded {len(ts):,} data points", state="complete")
 
-        WH   = _parse_float_list(wh_line)
-        mAh  = _parse_float_list(mah_line)
-        SoCi = _parse_float_list(soci_line)
-        SoCv = _parse_float_list(socv_line)
+            if ts.empty:
+                st.warning("No parsable power logs in the last 7 days.")
+            else:
+                ts = ts.drop_duplicates(subset=["t"]).sort_values("t").reset_index(drop=True)
 
-        L = max(len(WH), len(mAh), len(SoCi), len(SoCv))
-        if L == 0: return None
+                # ★ REVISED: colored lines, hovermode, better font
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(x=ts["t"], y=ts["PH_SoCi"], mode="lines",
+                                         name="SoC (%)", line=dict(color="#22c55e", width=2.5), yaxis="y1"))
+                fig.add_trace(go.Scatter(x=ts["t"], y=ts["PH_WH"],  mode="lines",
+                                         name="Energy (Wh)", line=dict(color="#f59e0b", width=2), yaxis="y2"))
+                fig.update_layout(
+                    title=dict(text="Battery & Energy — last 7 days", font=dict(size=16, family="DM Sans")),
+                    xaxis=dict(title=""),
+                    yaxis=dict(title="SoC (%)", range=[0, 105], titlefont=dict(color="#22c55e")),
+                    yaxis2=dict(title="Wh", overlaying="y", side="right", titlefont=dict(color="#f59e0b")),
+                    legend=dict(orientation="h", y=-0.12),
+                    margin=dict(l=10, r=10, t=50, b=10),
+                    hovermode="x unified",
+                )
+                st.plotly_chart(fig, use_container_width=True)
 
-        def _pad_left(arr: List[float], n: int) -> List[float]:
-            return [np.nan]*(n-len(arr)) + arr if len(arr) < n else arr[:n]
+                stitched_days = max(1, (ts["t"].max() - ts["t"].min()).days + 1)
+                st.caption(f"Range: {ts['t'].min().strftime('%Y-%m-%d %H:%M')} → {ts['t'].max().strftime('%Y-%m-%d %H:%M')} · {len(ts)} points")
 
-        WH   = _pad_left(WH,   L)
-        mAh  = _pad_left(mAh,  L)
-        SoCi = _pad_left(SoCi, L)
-        SoCv = _pad_left(SoCv, L)
+                # ★ REVISED: metric cards instead of st.metric
+                last = ts.iloc[-1]
+                st.markdown(f"""
+                <div class="kn-metrics">
+                    <div class="kn-metric"><div class="kn-metric-val">{last['PH_SoCi']:.1f}%</div><div class="kn-metric-label">Current SoC</div></div>
+                    <div class="kn-metric"><div class="kn-metric-val">{last['PH_WH']:.1f} Wh</div><div class="kn-metric-label">Current energy</div></div>
+                    <div class="kn-metric"><div class="kn-metric-val">{len(ts):,}</div><div class="kn-metric-label">Data points</div></div>
+                </div>
+                """, unsafe_allow_html=True)
 
-        times = [head_dt - timedelta(hours=(L-1 - i)) for i in range(L)]
-        df = pd.DataFrame({"t": times, "PH_WH": WH, "PH_mAh": mAh, "PH_SoCi": SoCi, "PH_SoCv": SoCv})
-
-        eps = 1e-9
-        all_zero_mask = (
-            (np.abs(df["PH_WH"])   < eps) &
-            (np.abs(df["PH_mAh"])  < eps) &
-            (np.abs(df["PH_SoCi"]) < eps) &
-            (np.abs(df["PH_SoCv"]) < eps)
-        )
-        df = df.loc[~all_zero_mask].reset_index(drop=True)
-        return df
-
-    cache_epoch = st.session_state.get("DRIVE_EPOCH", "0")
-    if st.button("Load power data", type="primary", key=k("tab3_show_btn")):
-        # ★ REVISED: use st.status for progressive feedback
-        with st.status("Building power time-series…", expanded=True) as pwr_status:
-            files = list_power_logs(logs_folder["id"], cache_epoch=cache_epoch)
-
-            window_days = 7
-            cutoff = datetime.now() - timedelta(days=window_days)
-
-            frames: List[pd.DataFrame] = []
-            for meta in files:
-                local = ensure_log_cached(meta, force=False)
-                df = parse_power_log(local)
-                if df is None or df.empty:
-                    continue
-                df = df[df["t"] >= cutoff]
-                if df.empty:
-                    break
-                frames.append(df)
-
-            ts = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(
-                columns=["t","PH_WH","PH_mAh","PH_SoCi","PH_SoCv"]
-            )
-            pwr_status.update(label=f"Loaded {len(ts):,} data points", state="complete")
-
-        if ts.empty:
-            st.warning("No parsable power logs in the last 7 days.")
-        else:
-            ts = ts.drop_duplicates(subset=["t"]).sort_values("t").reset_index(drop=True)
-
-            # ★ REVISED: colored lines, hovermode, better font
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=ts["t"], y=ts["PH_SoCi"], mode="lines",
-                                     name="SoC (%)", line=dict(color="#22c55e", width=2.5), yaxis="y1"))
-            fig.add_trace(go.Scatter(x=ts["t"], y=ts["PH_WH"],  mode="lines",
-                                     name="Energy (Wh)", line=dict(color="#f59e0b", width=2), yaxis="y2"))
-            fig.update_layout(
-                title=dict(text="Battery & Energy — last 7 days", font=dict(size=16, family="DM Sans")),
-                xaxis=dict(title=""),
-                yaxis=dict(title="SoC (%)", range=[0, 105], titlefont=dict(color="#22c55e")),
-                yaxis2=dict(title="Wh", overlaying="y", side="right", titlefont=dict(color="#f59e0b")),
-                legend=dict(orientation="h", y=-0.12),
-                margin=dict(l=10, r=10, t=50, b=10),
-                hovermode="x unified",
-            )
-            st.plotly_chart(fig, use_container_width=True)
-
-            stitched_days = max(1, (ts["t"].max() - ts["t"].min()).days + 1)
-            st.caption(f"Range: {ts['t'].min().strftime('%Y-%m-%d %H:%M')} → {ts['t'].max().strftime('%Y-%m-%d %H:%M')} · {len(ts)} points")
-
-            # ★ REVISED: metric cards instead of st.metric
-            last = ts.iloc[-1]
-            st.markdown(f"""
-            <div class="kn-metrics">
-                <div class="kn-metric"><div class="kn-metric-val">{last['PH_SoCi']:.1f}%</div><div class="kn-metric-label">Current SoC</div></div>
-                <div class="kn-metric"><div class="kn-metric-val">{last['PH_WH']:.1f} Wh</div><div class="kn-metric-label">Current energy</div></div>
-                <div class="kn-metric"><div class="kn-metric-val">{len(ts):,}</div><div class="kn-metric-label">Data points</div></div>
-            </div>
-            """, unsafe_allow_html=True)
+    _render_power_tab()
 
 # ================================
 # TAB 4 — GUI autostart log tail
 # ================================
 with tab4:
-    st.markdown("#### GUI autostart log")
-    st.markdown('<p class="kn-muted">Tail of the latest autostart log from the node. Newest lines first.</p>', unsafe_allow_html=True)
+    def _render_log_tab():  # ★ FIX: function wrapper
+        st.markdown("#### GUI autostart log")
+        st.markdown('<p class="kn-muted">Tail of the latest autostart log from the node. Newest lines first.</p>', unsafe_allow_html=True)
 
-    if not drive_enabled():
-        st.error("Google Drive is not configured in secrets.")
-        st.stop()
+        if not drive_enabled():
+            st.error("Google Drive is not configured in secrets.")
+            return  # ★ was st.stop()
 
-    # Locate: From the node / Power logs / raw
-    power_folder = find_subfolder_by_name(GDRIVE_FOLDER_ID, "Power logs")
-    if not power_folder:
-        st.warning("Could not find 'Power logs' under the Drive root.")
-        st.stop()
+        # Locate: From the node / Power logs / raw
+        power_folder = find_subfolder_by_name(GDRIVE_FOLDER_ID, "Power logs")
+        if not power_folder:
+            st.warning("Could not find 'Power logs' under the Drive root.")
+            return  # ★ was st.stop()
 
-    raw_folder = find_subfolder_by_name(power_folder["id"], "raw")
-    if not raw_folder:
-        st.warning("Could not find 'raw' inside 'Power logs'.")
-        st.stop()
+        raw_folder = find_subfolder_by_name(power_folder["id"], "raw")
+        if not raw_folder:
+            st.warning("Could not find 'raw' inside 'Power logs'.")
+            return  # ★ was st.stop()
 
-    cache_epoch = st.session_state.get("DRIVE_EPOCH", "0")
-    files = list_autostart_logs(raw_folder["id"], cache_epoch=cache_epoch)
+        cache_epoch = st.session_state.get("DRIVE_EPOCH", "0")
+        files = list_autostart_logs(raw_folder["id"], cache_epoch=cache_epoch)
 
-    colA, colB = st.columns([1, 3])
-    with colA:
-        do_refresh = st.button("↻ Refresh", key=k("tab4_refresh"))
-    if do_refresh:
-        st.cache_data.clear()
+        colA, colB = st.columns([1, 3])
+        with colA:
+            do_refresh = st.button("↻ Refresh", key=k("tab4_refresh"))
+        if do_refresh:
+            st.cache_data.clear()
+            try:
+                for p in POWER_CACHE.glob("*__gui_autostart.log"):
+                    p.unlink(missing_ok=True)
+            except Exception as e:
+                if type(e).__name__ in ("RerunException", "StopException", "RerunData"):
+                    raise
+                st.warning(f"Could not clear cached GUI logs: {e!s}")
+            st.rerun()
+
+        if not files:
+            st.info("No files matching `*__gui_autostart.log` were found in Power logs/raw.")
+            return  # ★ was st.stop()
+
+        latest = files[0]  # newest first
+
+        local = ensure_raw_cached(latest, force=True)
+
         try:
-            for p in POWER_CACHE.glob("*__gui_autostart.log"):
-                p.unlink(missing_ok=True)
+            size_bytes = local.stat().st_size
+            st.caption(
+                f"File: `{latest.get('name','(unknown)')}` — {size_bytes:,} bytes"
+            )
+        except Exception as e:
+            st.warning(f"Local cache path issue: {e!s}")
+
+        # Tail last 500 lines efficiently
+        def tail_lines(path: Path, max_lines: int = 500, block_size: int = 8192) -> List[str]:
+            try:
+                if not path.exists():
+                    return [f"[tail error] file does not exist: {path}"]
+                if path.stat().st_size == 0:
+                    return ["[tail notice] log file is empty (0 bytes)."]
+
+                with open(path, "rb") as f:
+                    f.seek(0, os.SEEK_END)
+                    end = f.tell()
+                    lines: List[bytes] = []
+                    buf = b""
+                    while end > 0 and len(lines) <= max_lines:
+                        read_size = min(block_size, end)
+                        end -= read_size
+                        f.seek(end, os.SEEK_SET)
+                        chunk = f.read(read_size)
+                        buf = chunk + buf
+                        parts = buf.split(b"\n")
+                        buf = parts[0]
+                        lines_chunk = parts[1:]
+                        lines = lines_chunk + lines
+                    text_lines = b"\n".join(lines).decode("utf-8", errors="replace").splitlines()
+                    return text_lines[-max_lines:]
+            except Exception as e:
+                return [f"[tail error] {e!s}"]
+
+        lines = tail_lines(local, max_lines=500)
+        lines = list(reversed(lines))
+        numbered = "\n".join(f"{i+1:>4}  {line}" for i, line in enumerate(lines))
+
+        fn = latest.get("name", "(unknown)")
+
+        try:
+            with open(local, "rb") as _fh:
+                st.download_button(
+                    "Download full log",
+                    _fh,
+                    file_name=fn,
+                    mime="text/plain",
+                    key=k("dl_gui_log"),
+                )
         except Exception as e:
             if type(e).__name__ in ("RerunException", "StopException", "RerunData"):
                 raise
-            st.warning(f"Could not clear cached GUI logs: {e!s}")
-        st.rerun()
+            st.warning(f"Could not open cached log for download: {e!s}")
 
-    if not files:
-        st.info("No files matching `*__gui_autostart.log` were found in Power logs/raw.")
-        st.stop()
-
-    latest = files[0]  # newest first
-
-    local = ensure_raw_cached(latest, force=True)
-
-    try:
-        size_bytes = local.stat().st_size
-        st.caption(
-            f"File: `{latest.get('name','(unknown)')}` — {size_bytes:,} bytes"
-        )
-    except Exception as e:
-        st.warning(f"Local cache path issue: {e!s}")
-
-    # Tail last 500 lines efficiently
-    def tail_lines(path: Path, max_lines: int = 500, block_size: int = 8192) -> List[str]:
-        try:
-            if not path.exists():
-                return [f"[tail error] file does not exist: {path}"]
-            if path.stat().st_size == 0:
-                return ["[tail notice] log file is empty (0 bytes)."]
-
-            with open(path, "rb") as f:
-                f.seek(0, os.SEEK_END)
-                end = f.tell()
-                lines: List[bytes] = []
-                buf = b""
-                while end > 0 and len(lines) <= max_lines:
-                    read_size = min(block_size, end)
-                    end -= read_size
-                    f.seek(end, os.SEEK_SET)
-                    chunk = f.read(read_size)
-                    buf = chunk + buf
-                    parts = buf.split(b"\n")
-                    buf = parts[0]
-                    lines_chunk = parts[1:]
-                    lines = lines_chunk + lines
-                text_lines = b"\n".join(lines).decode("utf-8", errors="replace").splitlines()
-                return text_lines[-max_lines:]
-        except Exception as e:
-            return [f"[tail error] {e!s}"]
-
-    lines = tail_lines(local, max_lines=500)
-    lines = list(reversed(lines))
-    numbered = "\n".join(f"{i+1:>4}  {line}" for i, line in enumerate(lines))
-
-    fn = latest.get("name", "(unknown)")
-
-    try:
-        with open(local, "rb") as _fh:
-            st.download_button(
-                "Download full log",
-                _fh,
-                file_name=fn,
-                mime="text/plain",
-                key=k("dl_gui_log"),
-            )
-    except Exception as e:
-        if type(e).__name__ in ("RerunException", "StopException", "RerunData"):
-            raise
-        st.warning(f"Could not open cached log for download: {e!s}")
-
-    st.code(numbered, language="log")
+        st.code(numbered, language="log")
+    _render_log_tab()
