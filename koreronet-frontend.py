@@ -1197,14 +1197,28 @@ def _latest_root_summary(root_id_or_path: str, live: bool) -> Tuple[Optional[str
 
     return mode_label, chosen, merged
 
-# ★ FIX: non-blocking welcome — tabs always render below this.
-#   Was blocking with st.stop() until user clicked "Continue →".
-def _render_welcome_section():
-    first_visit = not st.session_state.get("__welcome_done__", False)
-    with st.expander("🐦 **KōreroNET** — About this platform", expanded=first_visit):
-        st.session_state["__welcome_done__"] = True
+# Welcome overlay — blocks tabs until user clicks Continue
+def _render_welcome_overlay():
+    if st.session_state.get("__welcome_done__", False):
+        return
+    with st.spinner("Summarising latest detections…"):
+        mode, chosen_date, df = _latest_root_summary(GDRIVE_FOLDER_ID, False)
+    overlay = st.empty()
+    with overlay.container():
+        st.markdown('<div class="overlay-card">', unsafe_allow_html=True)
+        st.markdown('<div class="overlay-title">KōreroNET</div>', unsafe_allow_html=True)
+
+        # Top Continue CTA
+        st.markdown('<div class="overlay-cta-top">', unsafe_allow_html=True)
+        cta_top = st.button("Continue →", type="primary", key=k("welcome_continue_top"))
+        if cta_top:
+            st.session_state["__welcome_done__"] = True
+            st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+        st.markdown('<div class="overlay-cta-hint">Click <b>Continue</b> to enter the dashboard.</div>', unsafe_allow_html=True)
 
         # Technology highlights
+        st.markdown('<div class="overlay-sub">Our Technology Highlights</div>', unsafe_allow_html=True)
         features: List[Tuple[str, str]] = [
             ('🔊', 'Bioacoustic monitoring of all vocal species in New Zealand wildlife.'),
             ('🎧', 'Full-spectrum recording: ultrasonic and audible ranges.'),
@@ -1223,34 +1237,39 @@ def _render_welcome_section():
         feature_html += '</div>'
         st.markdown(feature_html, unsafe_allow_html=True)
 
-        # Latest field summary (cached — no blocking spinner)
-        try:
-            mode, chosen_date, df = _latest_root_summary(GDRIVE_FOLDER_ID, False)
-            if df is not None and not df.empty and chosen_date is not None:
-                counts = df["Label"].astype(str).value_counts()
-                top = [(lbl, int(counts[lbl])) for lbl in counts.index[:3]]
-                nice_day = _human_day(chosen_date)
-                sentence = f"{nice_day} we detected {_join_top(top)}."
-                total = int(counts.sum())
-                uniq  = int(counts.shape[0])
-                st.markdown(f"""
-                    <hr style="border:0; border-top:1px solid rgba(255,255,255,.06); margin:1rem 0;">
-                    <div class="overlay-sub">{sentence}</div>
-                    <div class="overlay-pill">Mode: {mode or '—'}</div>
-                    <div class="overlay-pill">Date: {chosen_date.isoformat()}</div>
-                    <div class="overlay-pill">Detections: {total:,}</div>
-                    <div class="overlay-pill">Species: {uniq:,}</div>
-                """, unsafe_allow_html=True)
-        except Exception:
-            pass  # non-blocking: if summary fails, just show the features
+        st.markdown('<hr style="border:0; border-top:1px solid rgba(255,255,255,.06); margin:1.5rem 0;">', unsafe_allow_html=True)
 
-        # Dismiss button — clicking triggers a rerun where expanded=False
-        if first_visit:
+        # Latest field summary
+        st.markdown('<div class="overlay-sub">Latest Field Summary</div>', unsafe_allow_html=True)
+        if df is None or df.empty or chosen_date is None:
+            st.markdown('<div class="overlay-sub">No parsable detections found in the most recent root CSVs.</div>', unsafe_allow_html=True)
+        else:
+            counts = df["Label"].astype(str).value_counts()
+            top = [(lbl, int(counts[lbl])) for lbl in counts.index[:3]]
+            nice_day = _human_day(chosen_date)
+            sentence = f"{nice_day} we detected {_join_top(top)}."
+            st.markdown(f'<div class="overlay-sub">{sentence}</div>', unsafe_allow_html=True)
+            total = int(counts.sum())
+            uniq  = int(counts.shape[0])
+            st.markdown(f"""
+                <div class="overlay-pill">Mode: {mode or '—'}</div>
+                <div class="overlay-pill">Date: {chosen_date.isoformat() if chosen_date else '—'}</div>
+                <div class="overlay-pill">Detections: {total:,}</div>
+                <div class="overlay-pill">Species: {uniq:,}</div>
+            """, unsafe_allow_html=True)
+
+        # Bottom Continue CTA
+        c1, c2 = st.columns([1, 5])
+        with c1:
             if st.button("Continue →", type="primary", key=k("welcome_continue")):
+                st.session_state["__welcome_done__"] = True
                 st.rerun()
 
-# Show welcome section (non-blocking — tabs render below)
-_render_welcome_section()
+        st.markdown('</div>', unsafe_allow_html=True)
+    st.stop()
+
+# Show the overlay once per session (after splash, before tabs)
+_render_welcome_overlay()
 
 # ★ REVISED: added ttl + max_entries
 @st.cache_data(ttl=300, max_entries=10, show_spinner=False)
