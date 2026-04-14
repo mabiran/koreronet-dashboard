@@ -740,9 +740,27 @@ def _match_legacy_master_name(name: str, kind: str) -> bool:
     else:
         return (("birdnet" in n) and ("detect" in n) and n.endswith(".csv"))
 
-# ★ REVISED: added ttl + max_entries
+# ★ FIX: fast month listing — 1 API call, no CSV parsing
+@st.cache_data(ttl=300, max_entries=5, show_spinner=False)
+def _list_snapshot_months(root_folder_id: str, _epoch: str = "") -> List[Tuple[int, int]]:
+    """List available (year, month) pairs from Backup/ folder names. Fast: 1 API call."""
+    backup = _find_backup_folder(root_folder_id)
+    if not backup:
+        return []
+    snaps = [kid for kid in list_children(backup["id"], max_items=2000)
+             if kid.get("mimeType") == "application/vnd.google-apps.folder"
+             and SNAP_RE.match(kid.get("name", ""))]
+    months = set()
+    for sn in snaps:
+        d = _parse_date_from_snapname(sn["name"])
+        if d:
+            months.add((d.year, d.month))
+    return sorted(months, reverse=True)
+
+# ★ REVISED: added ttl + max_entries + date filtering
 @st.cache_data(ttl=300, max_entries=5, show_spinner=True)
-def build_master_index_by_snapshot_date(root_folder_id: str, cache_epoch: str, nocache: str = "stable") -> pd.DataFrame:
+def build_master_index_by_snapshot_date(root_folder_id: str, cache_epoch: str, nocache: str = "stable",
+                                         date_from: Optional[date] = None, date_to: Optional[date] = None) -> pd.DataFrame:
     backup = _find_backup_folder(root_folder_id)
     if not backup:
         return pd.DataFrame(columns=[
@@ -759,6 +777,12 @@ def build_master_index_by_snapshot_date(root_folder_id: str, cache_epoch: str, n
         snap_id, snap_name = sn["id"], sn["name"]
         snap_date = _parse_date_from_snapname(snap_name)
         if not snap_date: continue
+
+        # ★ FIX: skip snapshots outside the requested date range (index only selected month)
+        if date_from and snap_date < date_from:
+            continue
+        if date_to and snap_date > date_to:
+            continue
 
         # ★ FIX: single list_children call per snapshot (was 3+ calls)
         snap_kids = list_children(snap_id, max_items=2000)
@@ -1500,7 +1524,7 @@ with tab1:
             text_auto=True, aspect="auto",
         )
         fig.update_layout(
-            title=dict(text=title, font=dict(size=16, family="DM Sans")),
+            title_text=title,
             margin=dict(l=10, r=10, t=50, b=10),
             coloraxis_colorbar=dict(thickness=14, len=0.6),
         )
@@ -1532,147 +1556,188 @@ with tab1:
 # TAB 2 — Verify (snapshot date)
 # ================================
 with tab_verify:
-    def _render_verify_tab():  # ★ FIX: function wrapper so return replaces st.stop()
+    def _render_verify_tab():
         st.markdown("#### Verify recordings")
-        st.markdown('<p class="kn-muted">Browse and listen to audio chunks from backup snapshots. Select a species and navigate through detections.</p>', unsafe_allow_html=True)
+        st.markdown('<p class="kn-muted">Pick a date, then browse and play audio chunks for that snapshot. Only the selected date is fetched from Drive.</p>', unsafe_allow_html=True)
 
         if not drive_enabled():
             st.error("Google Drive is not configured. Add credentials in Streamlit secrets to enable this tab.")
-            return  # ★ was st.stop()
+            return
 
-        # --- Small cooldown to avoid hammering audio playback ---
         NAV_COOLDOWN_SECONDS = 0.4
         if "tab2_last_play_ts" not in st.session_state:
             st.session_state["tab2_last_play_ts"] = 0.0
 
-        # ★ FIX: lazy-load — don't index 41K detections until user asks
-        if "verify_loaded" not in st.session_state:
-            st.session_state["verify_loaded"] = False
-
-        if not st.session_state["verify_loaded"]:
-            st.info("This tab indexes all backup snapshots from Drive (~142 dates, ~41K detections). Click below to load.")
-            if st.button("Load verification data", type="primary", key=k("verify_load_btn")):
-                st.session_state["verify_loaded"] = True
-                st.rerun()
+        # Step 1 — list available snapshot dates (ONE cheap API call to Backup/)
+        backup = _find_backup_folder(GDRIVE_FOLDER_ID)
+        if not backup:
+            st.warning("No `Backup` folder found under Drive root.")
             return
 
-        with st.status("Indexing master CSVs by snapshot date…", expanded=False) as idx_status:
-            cache_epoch = st.session_state.get("DRIVE_EPOCH", "0")
-            try:
-                master = build_master_index_by_snapshot_date(
-                    GDRIVE_FOLDER_ID, cache_epoch=cache_epoch, nocache="stable"
-                )
-                idx_status.update(
-                    label=f"Indexed {len(master):,} detections across {master['Date'].nunique() if not master.empty else 0} dates",
-                    state="complete",
-                )
-            except Exception as e:
-                if type(e).__name__ in ("RerunException", "StopException", "RerunData"):
-                    raise
-                master = pd.DataFrame()
-                idx_status.update(label=f"Indexing failed: {e!s}", state="error")
+        snap_folders = [kid for kid in list_children(backup["id"], max_items=2000)
+                        if kid.get("mimeType") == "application/vnd.google-apps.folder"
+                        and SNAP_RE.match(kid.get("name", ""))]
+        snap_folders.sort(key=lambda m: m.get("name", ""), reverse=True)
 
-        if master.empty or master.shape[0] == 0:
-            st.warning("No master CSVs found in any snapshot.")
-            return  # ★ was st.stop()
+        if not snap_folders:
+            st.warning("No snapshot folders found in Backup/.")
+            return
 
-        colA, colB = st.columns([2, 1])
-        with colA:
+        snap_date_map = {}
+        for sf in snap_folders:
+            sd = _parse_date_from_snapname(sf["name"])
+            if sd:
+                snap_date_map[sd] = sf
+        avail_dates = sorted(snap_date_map.keys(), reverse=True)
+
+        if not avail_dates:
+            st.info("No valid snapshot dates found.")
+            return
+
+        # Step 2 — user picks date + source + confidence BEFORE any CSV download
+        fc1, fc2, fc3 = st.columns([2, 2, 1])
+        with fc1:
+            day_pick = st.date_input(
+                "Snapshot date", value=avail_dates[0],
+                min_value=avail_dates[-1], max_value=avail_dates[0],
+                key=k("tab2_day"),
+            )
+        with fc2:
             src_mode_v = st.selectbox(
-                "Source",
-                ["KōreroNET (KN)", "BirdNET (BN)", "Combined"],
-                index=0,
-                key=k("tab2_src"),
+                "Source", ["KoreroNET (KN)", "BirdNET (BN)", "Combined"],
+                index=0, key=k("tab2_src"),
             )
-        with colB:
-            min_conf_v = st.slider(
-                "Min confidence", 0.0, 1.0, 0.90, 0.01, key=k("tab2_min_conf")
-            )
+        with fc3:
+            min_conf_v = st.slider("Min confidence", 0.0, 1.0, 0.90, 0.01, key=k("tab2_min_conf"))
 
-        try:
-            if src_mode_v == "KōreroNET (KN)":
-                pool = master[master["Kind"] == "KN"]
-            elif src_mode_v == "BirdNET (BN)":
-                pool = master[master["Kind"] == "BN"]
-            else:
-                pool = master
-            pool = pool[
-                pd.to_numeric(pool["Confidence"], errors="coerce")
-                >= float(min_conf_v)
-            ]
-        except Exception as e:
-            if type(e).__name__ in ("RerunException", "StopException", "RerunData"):
-                raise
-            pool = pd.DataFrame()
-            st.warning(f"Filter error (non-fatal): {e!s}")
+        if day_pick not in snap_date_map:
+            nearest = min(avail_dates, key=lambda d: abs((d - day_pick).days))
+            day_pick = nearest
+            st.caption(f"Snapped to nearest available: **{day_pick.isoformat()}**")
 
-        if pool.empty:
-            st.info("No rows above the selected confidence.")
-            return  # ★ was st.stop()
+        sn = snap_date_map[day_pick]
+        snap_id, snap_name = sn["id"], sn["name"]
+        st.caption(f"Snapshot: `{snap_name}` — {len(avail_dates)} total dates available")
 
-        try:
-            avail_days = sorted(pool["Date"].unique())
-        except Exception:
-            avail_days = []
-        if not avail_days:
-            st.info("No detections for any date with current filters.")
-            return  # ★ was st.stop()
+        # Step 3 — fetch ONLY this one snapshot (fast: 1-3 API calls, not 426)
+        cache_epoch = st.session_state.get("DRIVE_EPOCH", "0")
+        snap_kids = list_children(snap_id, max_items=2000)
+        chunk_dirs = _find_chunk_dirs(snap_id, kids=snap_kids)
 
-        day_default = avail_days[-1]
-        day_pick = st.date_input(
-            "Day",
-            value=day_default,
-            min_value=avail_days[0],
-            max_value=avail_days[-1],
-            key=k("tab2_day"),
-        )
+        rows_frames = []
 
-        day_df = pool[pool["Date"] == day_pick]
-        if day_df.empty:
-            st.warning("No detections for the chosen date.")
-            return  # ★ was st.stop()
+        if day_pick >= CUTOFF_NEW:
+            for kind_key, csv_name in [("KN", "koreronet_master.csv"), ("BN", "birdnet_master.csv")]:
+                if src_mode_v == "KoreroNET (KN)" and kind_key == "BN":
+                    continue
+                if src_mode_v == "BirdNET (BN)" and kind_key == "KN":
+                    continue
+                meta = _find_named_in_snapshot(snap_id, csv_name, kids=snap_kids)
+                if not meta:
+                    continue
+                csv_path = ensure_csv_cached(meta, subdir=f"snap_{snap_id}/{kind_key.lower()}", cache_epoch=cache_epoch, force=False)
+                try:
+                    df = pd.read_csv(csv_path)
+                    label_col = "Label" if "Label" in df.columns else ("Common name" if "Common name" in df.columns else None)
+                    conf_col  = "Probability" if "Probability" in df.columns else ("Confidence" if "Confidence" in df.columns else None)
+                    frame = pd.DataFrame({
+                        "Kind": kind_key,
+                        "Label": df[label_col].astype(str) if label_col else "Unknown",
+                        "Confidence": pd.to_numeric(df[conf_col], errors="coerce") if conf_col else np.nan,
+                        "Start": np.nan, "End": np.nan, "WavBase": "",
+                        "ChunkName": df.get("Clip", "").astype(str).str.strip(),
+                        "ChunkDriveFolderId": chunk_dirs[kind_key],
+                    })
+                    rows_frames.append(frame)
+                except Exception:
+                    pass
+        else:
+            for kind_key in (["KN", "BN"] if src_mode_v == "Combined" else
+                             ["KN"] if src_mode_v == "KoreroNET (KN)" else ["BN"]):
+                files_only = [f for f in snap_kids if f.get("mimeType") != "application/vnd.google-apps.folder"]
+                legacy = [f for f in files_only if _match_legacy_master_name(f.get("name",""), kind_key)]
+                if not legacy:
+                    for sf in [f for f in snap_kids if f.get("mimeType") == "application/vnd.google-apps.folder"]:
+                        cand = [f for f in list_children(sf["id"], max_items=2000)
+                                if f.get("mimeType") != "application/vnd.google-apps.folder"
+                                and _match_legacy_master_name(f.get("name",""), kind_key)]
+                        if cand:
+                            legacy = cand
+                            break
+                if not legacy:
+                    continue
+                legacy.sort(key=lambda m: m.get("modifiedTime",""), reverse=True)
+                csv_path = ensure_csv_cached(legacy[0], subdir=f"snap_{snap_id}/{kind_key.lower()}", cache_epoch=cache_epoch, force=False)
+                try:
+                    df = pd.read_csv(csv_path)
+                    wav_col = df.get("File", pd.Series(dtype=str)).astype(str).apply(os.path.basename)
+                    if kind_key == "BN":
+                        s_col = pd.to_numeric(df.get("Start (s)", df.get("Start", np.nan)), errors="coerce")
+                        e_col = pd.to_numeric(df.get("End (s)",   df.get("End",   np.nan)), errors="coerce")
+                        lab_col = df.get("Common name", df.get("Label", "Unknown")).astype(str)
+                    else:
+                        s_col = pd.to_numeric(df.get("Start", df.get("Start (s)", np.nan)), errors="coerce")
+                        e_col = pd.to_numeric(df.get("End",   df.get("End (s)",   np.nan)), errors="coerce")
+                        lab_col = df.get("Label", "Unknown").astype(str)
+                    conf_col = pd.to_numeric(df.get("Confidence", np.nan), errors="coerce")
+                    chunk_names = [_compose_chunk_name(kind_key.lower(), w, s, e, l, c)
+                                   for w, s, e, l, c in zip(wav_col, s_col, e_col, lab_col, conf_col)]
+                    frame = pd.DataFrame({
+                        "Kind": kind_key, "Label": lab_col,
+                        "Confidence": conf_col, "Start": s_col, "End": e_col,
+                        "WavBase": wav_col, "ChunkName": chunk_names,
+                        "ChunkDriveFolderId": chunk_dirs[kind_key],
+                    })
+                    rows_frames.append(frame)
+                except Exception:
+                    pass
 
-        counts = day_df.groupby("Label").size().sort_values(ascending=False)
+        if not rows_frames:
+            st.info(f"No detection data found for {day_pick.isoformat()} with source {src_mode_v}.")
+            return
+
+        master = pd.concat(rows_frames, ignore_index=True)
+        master = master[pd.to_numeric(master["Confidence"], errors="coerce") >= float(min_conf_v)]
+
+        if master.empty:
+            st.info("No detections above the selected confidence for this date.")
+            return
+
+        # Step 4 — species + playback
+        counts = master.groupby("Label").size().sort_values(ascending=False)
         species_list = list(counts.index)
 
-        sel_key = f"verify_species_sel::{day_pick.isoformat()}::{src_mode_v}"
-        prev_species = st.session_state.get(sel_key, None)
-        if prev_species not in species_list:
-            prev_species = species_list[0]
-            st.session_state[sel_key] = prev_species
+        st.markdown(f"""
+        <div class="kn-metrics">
+            <div class="kn-metric"><div class="kn-metric-val">{int(counts.sum()):,}</div><div class="kn-metric-label">Detections</div></div>
+            <div class="kn-metric"><div class="kn-metric-val">{len(species_list)}</div><div class="kn-metric-label">Species</div></div>
+            <div class="kn-metric"><div class="kn-metric-val">{min_conf_v:.0%}</div><div class="kn-metric-label">Confidence ≥</div></div>
+        </div>
+        """, unsafe_allow_html=True)
 
         species = st.selectbox(
-            "Species",
-            options=species_list,
-            index=species_list.index(prev_species),
+            "Species", options=species_list,
             format_func=lambda s: f"{s} — {counts[s]:,} detections",
-            key=f"verify_species::{day_pick.isoformat()}::{src_mode_v}",
+            key=k("v_species"),
         )
-        st.session_state[sel_key] = species
 
         playlist = (
-            day_df[day_df["Label"] == species]
+            master[master["Label"] == species]
             .sort_values(["Kind", "ChunkName"])
             .reset_index(drop=True)
         )
 
-        pkey = f"v2_playlist_sig::{day_pick.isoformat()}::{src_mode_v}::{species}"
-        sig = (len(playlist), tuple(playlist["ChunkName"].head(3)))
-        if st.session_state.get(pkey) != sig:
-            st.session_state[pkey] = sig
-            st.session_state[f"v2_idx::{pkey}"] = 0
+        if playlist.empty:
+            st.info("No clips for this species.")
+            return
 
-        idx_key = f"v2_idx::{pkey}"
-        idx = int(st.session_state.get(idx_key, 0)) % max(1, len(playlist))
+        idx_key = f"v2_idx::{day_pick}::{src_mode_v}::{species}"
+        if idx_key not in st.session_state:
+            st.session_state[idx_key] = 0
+        idx = st.session_state[idx_key] % len(playlist)
 
-        # Navigation row
         col1, col2, col3, col4 = st.columns([1, 1, 1, 6])
         do_play = False
-
-        if playlist.empty:
-            st.info("No clips for this species and day.")
-            return  # ★ was st.stop()
-
         with col1:
             if st.button("⏮ Prev", key=k("tab2_prev"), use_container_width=True):
                 idx = (idx - 1) % len(playlist)
@@ -1691,48 +1756,44 @@ with tab_verify:
             st.markdown(f'<p class="kn-muted" style="padding-top:.6rem">{idx + 1} / {len(playlist)}</p>', unsafe_allow_html=True)
 
         st.session_state[idx_key] = idx
-
         row = playlist.iloc[idx]
+
         try:
-            conf_val = float(row["Confidence"])
-            conf_str = f"{conf_val:.3f}"
+            conf_str = f"{float(row['Confidence']):.3f}"
         except Exception:
             conf_str = "n/a"
 
-        # ★ REVISED: styled metadata card
         st.markdown(f"""
         <div class="kn-player">
             <div class="kn-player-meta">
                 <strong>Chunk:</strong> {row['ChunkName']}<br>
-                <strong>Date:</strong> {row['Date']} &nbsp;·&nbsp;
+                <strong>Date:</strong> {day_pick} &nbsp;·&nbsp;
                 <strong>Source:</strong> {row['Kind']} &nbsp;·&nbsp;
                 <strong>Confidence:</strong> {conf_str}
             </div>
         </div>
         """, unsafe_allow_html=True)
 
-        # Safe audio fetch with retry
         @_retry()
-        def _safe_chunk_cached(chunk_name: str, folder_id: str, subdir: str) -> Optional[Path]:
+        def _safe_chunk_cached(chunk_name, folder_id, subdir):
             return ensure_chunk_cached(chunk_name, folder_id, subdir=subdir, force=False)
 
-        def _play_audio(row_: pd.Series):
+        if do_play:
             try:
-                chunk_name = str(row_.get("ChunkName", "") or "")
-                folder_id = str(row_.get("ChunkDriveFolderId", "") or "")
-                kind = str(row_.get("Kind", "UNK") or "")
+                chunk_name = str(row.get("ChunkName", "") or "")
+                folder_id = str(row.get("ChunkDriveFolderId", "") or "")
+                kind = str(row.get("Kind", "UNK") or "")
                 if not chunk_name or not folder_id:
                     st.warning("No chunk mapping available.")
                     return
-                subdir = f"{kind}"
                 with st.spinner("Fetching audio…"):
-                    cached = _safe_chunk_cached(chunk_name, folder_id, subdir=subdir)
+                    cached = _safe_chunk_cached(chunk_name, folder_id, subdir=kind)
                 if not cached or not cached.exists():
                     st.warning("Audio chunk not found in Drive folder.")
                     return
                 try:
-                    if cached.stat().st_size > 30 * 1024 * 1024:  # 30 MB sanity cap
-                        st.warning("Audio file too large to preview safely.")
+                    if cached.stat().st_size > 30 * 1024 * 1024:
+                        st.warning("Audio file too large to preview (>30 MB).")
                         return
                     with open(cached, "rb") as f:
                         data = f.read()
@@ -1744,17 +1805,11 @@ with tab_verify:
                         raise
                     st.warning(f"Cannot open audio chunk: {e!s}")
                     return
-
                 st.audio(data, format="audio/wav")
-
             except Exception as e:
                 if type(e).__name__ in ("RerunException", "StopException", "RerunData"):
                     raise
                 st.warning(f"Playback error (non-fatal): {e!s}")
-
-        if do_play:
-            _play_audio(row)
-
 
     _render_verify_tab()
 
@@ -1890,17 +1945,18 @@ with tab3:
             else:
                 ts = ts.drop_duplicates(subset=["t"]).sort_values("t").reset_index(drop=True)
 
-                # ★ REVISED: colored lines, hovermode, better font
+                # ★ FIX: Plotly 6.x compatible layout (titlefont/title dict removed)
                 fig = go.Figure()
                 fig.add_trace(go.Scatter(x=ts["t"], y=ts["PH_SoCi"], mode="lines",
                                          name="SoC (%)", line=dict(color="#22c55e", width=2.5), yaxis="y1"))
                 fig.add_trace(go.Scatter(x=ts["t"], y=ts["PH_WH"],  mode="lines",
                                          name="Energy (Wh)", line=dict(color="#f59e0b", width=2), yaxis="y2"))
                 fig.update_layout(
-                    title=dict(text="Battery & Energy — last 7 days", font=dict(size=16, family="DM Sans")),
-                    xaxis=dict(title=""),
-                    yaxis=dict(title="SoC (%)", range=[0, 105], titlefont=dict(color="#22c55e")),
-                    yaxis2=dict(title="Wh", overlaying="y", side="right", titlefont=dict(color="#f59e0b")),
+                    title_text="Battery & Energy — last 7 days",
+                    xaxis_title="",
+                    yaxis_title="SoC (%)",
+                    yaxis_range=[0, 105],
+                    yaxis2=dict(title="Wh", overlaying="y", side="right"),
                     legend=dict(orientation="h", y=-0.12),
                     margin=dict(l=10, r=10, t=50, b=10),
                     hovermode="x unified",
