@@ -1244,6 +1244,11 @@ def _render_welcome_section():
         except Exception:
             pass  # non-blocking: if summary fails, just show the features
 
+        # Dismiss button — clicking triggers a rerun where expanded=False
+        if first_visit:
+            if st.button("Continue →", type="primary", key=k("welcome_continue")):
+                st.rerun()
+
 # Show welcome section (non-blocking — tabs render below)
 _render_welcome_section()
 
