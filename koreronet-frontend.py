@@ -1264,6 +1264,15 @@ def ensure_raw_cached(meta: Dict[str, Any], force: bool = False) -> Path:
     local_path = POWER_CACHE / meta["name"]
     return download_to(local_path, meta["id"], force=force)
 
+# ★ FIX: moved to module level so both Power and Log tabs can access it
+def find_subfolder_by_name(root_id: str, name_ci: str) -> Optional[Dict[str, Any]]:
+    """Find a subfolder by case-insensitive name."""
+    kids = list_children(root_id, max_items=2000)
+    for kid in kids:
+        if kid.get("mimeType") == "application/vnd.google-apps.folder" and kid.get("name","").lower() == name_ci.lower():
+            return kid
+    return None
+
 # ============================================================================
 # Tabs
 # ============================================================================
@@ -1735,13 +1744,6 @@ with tab3:
 
         if not drive_enabled():
             st.error("Google Drive is not configured in secrets."); return  # ★ was st.stop()
-
-        def find_subfolder_by_name(root_id: str, name_ci: str) -> Optional[Dict[str, Any]]:
-            kids = list_children(root_id, max_items=2000)
-            for k in kids:
-                if k.get("mimeType")=="application/vnd.google-apps.folder" and k.get("name","").lower()==name_ci.lower():
-                    return k
-            return None
 
         logs_folder = find_subfolder_by_name(GDRIVE_FOLDER_ID, "Power logs")
         if not logs_folder:
