@@ -1324,8 +1324,8 @@ def find_subfolder_by_name(root_id: str, name_ci: str) -> Optional[Dict[str, Any
 # ============================================================================
 # Tabs
 # ============================================================================
-tab_nodes, tab1, tab_verify, tab3, tab4 = st.tabs([
-    "🗺️ Nodes", "📊 Detections", "🎧 Verify recordings", "⚡ Power", "📋 Log"
+tab_nodes, tab1, tab_verify, tab3, tab4, tab_search = st.tabs([
+    "🗺️ Nodes", "📊 Detections", "🎧 Verify recordings", "⚡ Power", "📋 Log", "🔍 Search"
 ])
 
 # ==================================
@@ -2083,3 +2083,252 @@ with tab4:
 
         st.code(numbered, language="log")
     _render_log_tab()
+
+
+# ==================================
+# TAB 6 — Species Search & Trends
+# ==================================
+with tab_search:
+    def _render_search_tab():
+        st.markdown("#### Species search & trends")
+        st.markdown('<p class="kn-muted">Search for one or more species across a date range. See daily detection counts and peak activity hours.</p>', unsafe_allow_html=True)
+
+        # ── Load CSV index (cached — effectively free after first Detections tab visit) ──
+        cache_epoch = st.session_state.get("DRIVE_EPOCH", "0")
+        if drive_enabled():
+            bn_meta, kn_meta = list_csvs_drive_root(GDRIVE_FOLDER_ID, cache_epoch=cache_epoch, nocache="stable")
+            if bn_meta or kn_meta:
+                bn_paths = [str(ensure_csv_cached(m, subdir="root/bn", cache_epoch=cache_epoch, force=False)) for m in bn_meta]
+                kn_paths = [str(ensure_csv_cached(m, subdir="root/kn", cache_epoch=cache_epoch, force=False)) for m in kn_meta]
+            else:
+                bn_paths, kn_paths = [], []
+        else:
+            bn_local, kn_local = list_csvs_local(ROOT_LOCAL)
+            bn_paths, kn_paths = list(bn_local), list(kn_local)
+
+        bn_by_date = build_date_index(bn_paths, "bn") if bn_paths else {}
+        kn_by_date = build_date_index(kn_paths, "kn") if kn_paths else {}
+        all_dates = sorted(set(bn_by_date.keys()) | set(kn_by_date.keys()))
+
+        if not all_dates:
+            st.warning("No detection data available. Check your Drive connection or local data path.")
+            return
+
+        # ── Build a quick species list from the latest date (for autocomplete hint) ──
+        @st.cache_data(ttl=600, max_entries=5, show_spinner=False)
+        def _get_species_list(_paths_bn, _paths_kn, _latest_date):
+            """Get unique species from latest date for the hint text."""
+            species = set()
+            for kind, idx in [("bn", bn_by_date), ("kn", kn_by_date)]:
+                for p in idx.get(_latest_date, []):
+                    try:
+                        raw = load_csv(p)
+                        std = standardize_root_df(raw, kind)
+                        species.update(std["Label"].dropna().unique())
+                    except Exception:
+                        pass
+            return sorted(species)
+
+        known_species = _get_species_list(tuple(bn_paths), tuple(kn_paths), all_dates[-1])
+
+        # ── Input form ──
+        with st.form(key=k("search_form")):
+            st.markdown("**Enter species names** (comma-separated)")
+            species_input = st.text_input(
+                "Species",
+                placeholder="e.g. Tui, Morepork, Silvereye",
+                key=k("search_species"),
+                label_visibility="collapsed",
+            )
+            if known_species:
+                st.caption(f"Available species include: {', '.join(known_species[:15])}{'…' if len(known_species) > 15 else ''}")
+
+            sc1, sc2, sc3, sc4 = st.columns([2, 2, 1, 1])
+            with sc1:
+                default_start = max(all_dates[0], all_dates[-1] - timedelta(days=30))
+                d_start = st.date_input("Start date", value=default_start,
+                                         min_value=all_dates[0], max_value=all_dates[-1],
+                                         key=k("search_start"))
+            with sc2:
+                d_end = st.date_input("End date", value=all_dates[-1],
+                                       min_value=all_dates[0], max_value=all_dates[-1],
+                                       key=k("search_end"))
+            with sc3:
+                search_conf = st.slider("Min confidence", 0.0, 1.0, 0.80, 0.01, key=k("search_conf"))
+            with sc4:
+                search_src = st.selectbox("Source", ["Combined", "KōreroNET", "BirdNET"], key=k("search_src"))
+
+            submitted = st.form_submit_button("Search", type="primary", use_container_width=True)
+
+        if not submitted:
+            st.info("Enter species names and click **Search** to see trends.")
+            return
+
+        # ── Parse species input ──
+        target_species = [s.strip() for s in species_input.split(",") if s.strip()]
+        if not target_species:
+            st.warning("Please enter at least one species name.")
+            return
+
+        # ── Determine which date indices to use ──
+        if search_src == "BirdNET":
+            date_indices = [("bn", bn_by_date)]
+        elif search_src == "KōreroNET":
+            date_indices = [("kn", kn_by_date)]
+        else:
+            date_indices = [("bn", bn_by_date), ("kn", kn_by_date)]
+
+        # ── Collect all relevant dates in range ──
+        dates_in_range = [d for d in all_dates if d_start <= d <= d_end]
+        if not dates_in_range:
+            st.warning(f"No data available between {d_start} and {d_end}.")
+            return
+
+        # ── Load & filter: only CSVs that overlap the date range ──
+        with st.status(f"Searching {len(dates_in_range)} dates for {len(target_species)} species…", expanded=True) as search_status:
+            # Collect unique CSV paths to avoid loading the same file twice
+            paths_to_load: Dict[str, str] = {}  # path → kind
+            for kind, idx in date_indices:
+                for d in dates_in_range:
+                    for p in idx.get(d, []):
+                        if p not in paths_to_load:
+                            paths_to_load[p] = kind
+
+            # Load all relevant CSVs (cached) and filter
+            frames = []
+            for p, kind in paths_to_load.items():
+                try:
+                    raw = load_csv(p)
+                    std = standardize_root_df(raw, kind)
+                    # Filter by date range
+                    std = std[(std["ActualTime"].dt.date >= d_start) & (std["ActualTime"].dt.date <= d_end)]
+                    # Filter by confidence
+                    std = std[pd.to_numeric(std["Confidence"], errors="coerce") >= search_conf]
+                    if not std.empty:
+                        frames.append(std)
+                except Exception:
+                    pass
+
+            if not frames:
+                search_status.update(label="No detections found.", state="error")
+                return
+
+            df_all = pd.concat(frames, ignore_index=True)
+
+            # Case-insensitive fuzzy match: find species whose name contains the search term
+            matched_species = set()
+            for target in target_species:
+                target_lower = target.lower()
+                matches = df_all[df_all["Label"].str.lower().str.contains(target_lower, na=False)]["Label"].unique()
+                matched_species.update(matches)
+
+            if not matched_species:
+                search_status.update(label=f"No matches found for: {', '.join(target_species)}", state="error")
+                st.info(f"No species matching **{', '.join(target_species)}** found in the data. "
+                        f"Try partial names (e.g. 'Tui' instead of 'North Island Tui').")
+                return
+
+            # Filter to matched species only
+            df = df_all[df_all["Label"].isin(matched_species)].copy()
+            df["Date"] = df["ActualTime"].dt.date
+            df["Hour"] = df["ActualTime"].dt.hour
+
+            search_status.update(
+                label=f"Found {len(df):,} detections across {len(matched_species)} species",
+                state="complete",
+            )
+
+        # ── Summary metrics ──
+        st.markdown(f"""
+        <div class="kn-metrics">
+            <div class="kn-metric"><div class="kn-metric-val">{len(df):,}</div><div class="kn-metric-label">Total detections</div></div>
+            <div class="kn-metric"><div class="kn-metric-val">{len(matched_species)}</div><div class="kn-metric-label">Species matched</div></div>
+            <div class="kn-metric"><div class="kn-metric-val">{df['Date'].nunique()}</div><div class="kn-metric-label">Days with data</div></div>
+            <div class="kn-metric"><div class="kn-metric-val">{search_conf:.0%}</div><div class="kn-metric-label">Confidence ≥</div></div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # ── Chart 1: Daily detection trend (line chart, one line per species) ──
+        st.markdown("##### Daily detections")
+        daily = df.groupby(["Date", "Label"]).size().reset_index(name="Detections")
+        daily["Date"] = pd.to_datetime(daily["Date"])
+
+        # Fill missing dates with 0 so lines don't jump across gaps
+        full_dates = pd.date_range(d_start, d_end, freq="D")
+        filled_frames = []
+        for sp in sorted(matched_species):
+            sp_data = daily[daily["Label"] == sp].set_index("Date").reindex(full_dates, fill_value=0)
+            sp_data["Label"] = sp
+            sp_data.index.name = "Date"
+            filled_frames.append(sp_data.reset_index())
+        daily_filled = pd.concat(filled_frames, ignore_index=True)
+
+        fig_daily = px.line(
+            daily_filled, x="Date", y="Detections", color="Label",
+            markers=True if len(dates_in_range) <= 60 else False,
+            labels={"Detections": "Detections", "Date": "", "Label": "Species"},
+        )
+        fig_daily.update_layout(
+            legend=dict(orientation="h", y=-0.15),
+            margin=dict(l=10, r=10, t=10, b=10),
+            hovermode="x unified",
+        )
+        fig_daily.update_traces(line=dict(width=2.5))
+        st.plotly_chart(fig_daily, use_container_width=True)
+
+        # ── Chart 2: Hour-of-day activity (heatmap: species × hour) ──
+        st.markdown("##### Peak activity by hour of day")
+        hourly = df.groupby(["Label", "Hour"]).size().reset_index(name="Count")
+        hour_labels = {h: f"{(h % 12) or 12} {'AM' if h < 12 else 'PM'}" for h in range(24)}
+        order = [hour_labels[h] for h in range(24)]
+
+        pivot = hourly.pivot_table(index="Label", columns="Hour", values="Count", fill_value=0).astype(int)
+        # Ensure all 24 hours present
+        for h in range(24):
+            if h not in pivot.columns:
+                pivot[h] = 0
+        pivot = pivot[sorted(pivot.columns)]
+        pivot.columns = [hour_labels[h] for h in pivot.columns]
+
+        # Sort species by total detections (most active at top)
+        totals = pivot.sum(axis=1)
+        pivot = pivot.loc[totals.sort_values(ascending=False).index]
+
+        fig_hourly = px.imshow(
+            pivot.values, x=pivot.columns, y=pivot.index,
+            color_continuous_scale="YlOrRd",
+            labels=dict(x="Hour", y="Species", color="Detections"),
+            text_auto=True, aspect="auto",
+        )
+        fig_hourly.update_layout(
+            margin=dict(l=10, r=10, t=10, b=10),
+            coloraxis_colorbar=dict(thickness=14, len=0.6),
+        )
+        fig_hourly.update_xaxes(type="category")
+        st.plotly_chart(fig_hourly, use_container_width=True)
+
+        # ── Per-species peak hour summary ──
+        st.markdown("##### Peak hour per species")
+        peak_data = []
+        for sp in sorted(matched_species):
+            sp_hourly = df[df["Label"] == sp].groupby("Hour").size()
+            if sp_hourly.empty:
+                continue
+            peak_hour = sp_hourly.idxmax()
+            peak_count = sp_hourly.max()
+            total = sp_hourly.sum()
+            days_active = df[df["Label"] == sp]["Date"].nunique()
+            avg_per_day = total / max(days_active, 1)
+            peak_data.append({
+                "Species": sp,
+                "Peak hour": hour_labels[peak_hour],
+                "Detections at peak": int(peak_count),
+                "Total detections": int(total),
+                "Days active": days_active,
+                "Avg / day": f"{avg_per_day:.1f}",
+            })
+
+        if peak_data:
+            st.dataframe(pd.DataFrame(peak_data), use_container_width=True, hide_index=True)
+
+    _render_search_tab()
