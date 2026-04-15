@@ -1785,11 +1785,9 @@ elif page == "Search":
 
         known = _species_hint(tuple(bn_paths), tuple(kn_paths), all_dates[-1])
 
-        species_sel = st.multiselect(
-            "Select species",
-            options=known if known else [],
-            default=None,
-            placeholder="Type to search species…",
+        species_input = st.text_input(
+            "Species (comma-separated)",
+            placeholder="e.g. Tui, Morepork, Silvereye",
             key=k("s_sp"),
         )
 
@@ -1805,7 +1803,7 @@ elif page == "Search":
             search_src = st.selectbox("Source", ["Combined", "KōreroNET", "BirdNET"], key=k("s_src"))
 
         if st.button("Search", type="primary", use_container_width=True, key=k("s_go")):
-            target_species = list(species_sel)
+            target_species = [s.strip() for s in species_input.split(",") if s.strip()]
             if not target_species:
                 st.warning("Please enter at least one species name.")
             else:
