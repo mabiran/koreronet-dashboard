@@ -69,197 +69,79 @@ def _retry(exceptions=(Exception,), tries=3, base_delay=0.35, max_delay=1.2, jit
         return wrap
     return deco
 
-# ─────────────────────────────────────────────────────────────
-# Page style
-# ─────────────────────────────────────────────────────────────
-st.set_page_config(page_title="KōreroNET Dashboard", layout="wide")
 
-# ★ REVISED: modernised CSS — better font pairing (DM Sans + JetBrains Mono),
-#   CSS variables for consistent theming, improved tab/card/pill styling,
-#   feature grid, metric cards, player card. Kept all original class names
-#   so nothing breaks.
+# ─────────────────────────────────────────────────────────────
+# Page config + theme-adaptive CSS
+# ─────────────────────────────────────────────────────────────
+st.set_page_config(page_title="KōreroNET Dashboard", page_icon="🐦", layout="wide", initial_sidebar_state="expanded")
+
 st.markdown("""
 <style>
-/* ── Import distinctive font pair ── */
-@import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,600;9..40,700&family=JetBrains+Mono:wght@400;500&display=swap');
 
 :root {
-  --kn-green:    #22c55e;
-  --kn-green-d:  #16a34a;
-  --kn-green-bg: rgba(34,197,94,.08);
-  --kn-surface:  rgba(255,255,255,.03);
-  --kn-border:   rgba(255,255,255,.07);
-  --kn-text:     rgba(255,255,255,.92);
-  --kn-muted:    rgba(255,255,255,.55);
-  --kn-radius:   12px;
-  --kn-font:     'DM Sans', system-ui, sans-serif;
-  --kn-mono:     'JetBrains Mono', ui-monospace, monospace;
+  --kn-green: #2E7D32;
+  --kn-green-l: #4CAF50;
+  --kn-radius: 10px;
+  --kn-font: 'DM Sans', system-ui, sans-serif;
+  --kn-mono: 'JetBrains Mono', ui-monospace, monospace;
 }
 
-html, body, [data-testid="stAppViewContainer"] {
-  font-family: var(--kn-font) !important;
-}
-
-/* Global container tweaks */
-.block-container { padding-top: 1rem; padding-bottom: 1rem; max-width: 1320px; }
-
-/* Hide Streamlit chrome */
-[data-testid="stHeader"] { background: transparent !important; }
-[data-testid="stDecoration"] { display: none !important; }
-[data-testid="stStatusWidget"] { display: none !important; }
-#MainMenu, footer, header { visibility: hidden; }
-
-/* Centered splash wrapper */
-.center-wrap {
-  display: flex; align-items: center; justify-content: center;
-  min-height: 65vh; text-align: center;
-}
-
-/* Brand text (splash) */
-.brand-title { font-family: var(--kn-font); font-size: clamp(48px, 8vw, 96px); font-weight: 800; letter-spacing: .02em; }
-.brand-sub   { font-family: var(--kn-font); font-size: clamp(28px, 4vw, 48px); font-weight: 600; opacity: .9; margin-top: .4rem; }
-
-/* Simple fade helpers */
-.fade-enter { animation: fadeIn 400ms ease forwards; }
-.fade-exit  { animation: fadeOut 400ms ease forwards; }
-@keyframes fadeIn { from {opacity:0} to {opacity:1} }
-@keyframes fadeOut { from {opacity:1} to {opacity:0} }
-
-/* Alive dot pulse */
-.pulse {
-  position: relative; width: 14px; height: 14px; margin: 18px auto 0;
-  border-radius: 50%; background: var(--kn-green-d); box-shadow: 0 0 0 rgba(22,163,74,.7);
-  animation: pulse 1.6s infinite;
-}
-@keyframes pulse {
-  0%   { box-shadow: 0 0 0 0 rgba(22,163,74,.7); }
-  70%  { box-shadow: 0 0 0 22px rgba(22,163,74,0); }
-  100% { box-shadow: 0 0 0 0 rgba(22,163,74,0); }
-}
-
-/* ★ Tabs — refined styling */
-.stTabs [role="tablist"] { gap: .35rem; border-bottom: 1px solid var(--kn-border); padding-bottom: .5rem; }
-.stTabs [role="tab"] {
-  font-family: var(--kn-font); font-weight: 600; font-size: .95rem;
-  padding: .55rem 1.1rem; border-radius: 8px;
-  border: 1px solid transparent; transition: all .15s ease;
-}
-.stTabs [role="tab"]:hover { background: var(--kn-green-bg); }
-.stTabs [role="tab"][aria-selected="true"] {
-  background: var(--kn-green-bg); border-color: var(--kn-green);
-  color: var(--kn-green) !important;
-}
-
-/* Small helper text */
-.small { font-size: 0.9rem; opacity: 0.85; }
-
-/* Overlay card — solid background to avoid banding */
-.overlay-card {
-  max-width: 860px; margin: 4vh auto; padding: 24px 28px;
-  border: 1px solid var(--kn-border); border-radius: 16px;
-  background: rgba(28,28,28,.96);
-  box-shadow: 0 10px 30px rgba(0,0,0,.35);
-}
-.overlay-title { font-family: var(--kn-font); font-size: clamp(28px,4vw,42px); font-weight: 800; letter-spacing:.01em; margin-bottom:.25rem; }
-.overlay-sub   { font-size: clamp(16px,2.2vw,18px); opacity:.9; margin-bottom: .75rem; }
-.overlay-pill  {
-  display:inline-block; padding:.35rem .75rem; border:1px solid rgba(255,255,255,.12); border-radius:999px;
-  margin:.25rem .25rem 0 0; font-size:.88rem; background: var(--kn-surface);
-  color: var(--kn-muted);
-}
-
-/* Transparent hr and trim empty DOM nodes inside overlay */
-.overlay-card hr { border: 0; height: 0; }
-.overlay-card :where(p,div,span):empty { display: none !important; }
-
-/* Sticky top CTA + hint */
-.overlay-cta-top{
-  position: sticky; top: -12px; z-index: 3;
-  margin: -8px -8px 12px -8px; padding: 10px 12px;
-  background: rgba(28,28,28,.98); border-bottom: 1px solid rgba(255,255,255,.06);
-  display:flex; justify-content:center;
-}
-.overlay-cta-hint{ font-size:.92rem; opacity:.8; margin-top:.35rem; text-align:center; }
-
-/* Make overlay buttons unmissable (scoped) */
-.overlay-card .stButton > button{
-  font-size: 1.1rem; font-weight: 800;
-  padding: .85rem 1.3rem; border-radius: 999px;
-  border: 2px solid var(--kn-green);
-  background: linear-gradient(180deg, var(--kn-green), var(--kn-green-d));
-  color:#0b0f0c;
-  box-shadow: 0 10px 28px rgba(34,197,94,.35);
-  transition: transform .12s ease, box-shadow .12s ease;
-}
-.overlay-card .stButton > button:hover{
-  transform: translateY(-1px);
-  box-shadow: 0 14px 32px rgba(34,197,94,.45);
-}
-.overlay-card .stButton > button:focus{
-  outline: 3px solid rgba(34,197,94,.6);
-  outline-offset: 2px;
-}
-
-@keyframes nudge { 0%,100%{transform:translateX(0)} 50%{transform:translateX(4px)} }
-.overlay-card .stButton > button span{
-  display:inline-block; animation:nudge 1.2s ease-in-out infinite;
-}
-
-/* ★ Features grid — refined */
-.features-grid{
-  display:grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  gap: .75rem; margin-top: 1rem;
-}
-.feature-card{
-  display:flex; align-items:flex-start; gap:.6rem;
-  background: var(--kn-surface);
-  border: 1px solid var(--kn-border);
-  border-radius: 10px; padding: .7rem .85rem;
-}
-.feature-icon{ font-size: 1.3rem; line-height: 1.3rem; }
-.feature-text{ font-size: .92rem; line-height: 1.35rem; flex: 1; color: var(--kn-muted); }
-
-/* ★ Metric cards (new) */
-.kn-metrics { display: flex; gap: 1rem; flex-wrap: wrap; margin: .75rem 0; }
-.kn-metric {
-  flex: 1; min-width: 140px; padding: .85rem 1rem;
-  background: var(--kn-surface); border: 1px solid var(--kn-border);
-  border-radius: 10px; text-align: center;
-}
-.kn-metric-val   { font-size: 1.5rem; font-weight: 800; color: var(--kn-green); }
-.kn-metric-label { font-size: .78rem; color: var(--kn-muted); margin-top: .15rem; }
-
-/* ★ Player card (verify tab) */
-.kn-player {
-  background: var(--kn-surface); border: 1px solid var(--kn-border);
-  border-radius: var(--kn-radius); padding: 1rem 1.25rem; margin: .75rem 0;
-}
-.kn-player-meta { font-family: var(--kn-mono); font-size: .82rem; color: var(--kn-muted); line-height: 1.6; }
-
-/* Code blocks */
+html, body, [data-testid="stAppViewContainer"] { font-family: var(--kn-font) !important; }
+.block-container { padding-top: 1.2rem; max-width: 1320px; }
+#MainMenu, footer, [data-testid="stDecoration"] { display: none !important; }
 code, .stCode, [data-testid="stCode"] { font-family: var(--kn-mono) !important; }
 
-/* Plots: breathing room */
-.stPlotlyChart, .stPydeckChart, .stFolioMap {
-  max-width: 92% !important;
-  margin: 0 auto 1.5rem auto !important;
-  border-radius: 12px;
-  overflow: hidden;
+/* ── Theme-adaptive stat cards ── */
+.kn-metrics { display: flex; gap: .75rem; flex-wrap: wrap; margin: .75rem 0; }
+.kn-metric {
+  flex: 1; min-width: 130px; padding: .8rem 1rem;
+  border-radius: var(--kn-radius); text-align: center;
+  border: 1px solid rgba(128,128,128,.15);
 }
-iframe[title*="folium"], iframe[title*="pydeck"] {
-  max-width: 92% !important;
-  margin: 0 auto 1.5rem auto !important;
-  display: block;
-  border-radius: 12px;
+.kn-metric-val { font-size: 1.5rem; font-weight: 800; }
+.kn-metric-label { font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; opacity: .65; margin-top: .15rem; }
+
+/* Light mode */
+@media (prefers-color-scheme: light) {
+  .kn-metric { background: #ffffff; border-color: rgba(0,0,0,.08); }
+  .kn-metric-val { color: #1B5E20; }
 }
-@media (max-width: 1000px) {
-  .stPlotlyChart, .stPydeckChart, .stFolioMap, iframe[title*="folium"] {
-    max-width: 98% !important;
-  }
+/* Dark mode */
+@media (prefers-color-scheme: dark) {
+  .kn-metric { background: #1E1E1E; border-color: rgba(255,255,255,.08); }
+  .kn-metric-val { color: #4CAF50; }
 }
 
-/* ★ Muted helper */
-.kn-muted { color: var(--kn-muted); font-size: .88rem; }
+/* ── Player card ── */
+.kn-player {
+  border: 1px solid rgba(128,128,128,.15); border-radius: var(--kn-radius);
+  padding: 1rem 1.25rem; margin: .75rem 0;
+}
+.kn-player-meta { font-family: var(--kn-mono); font-size: .82rem; line-height: 1.6; }
+
+/* ── Features grid ── */
+.features-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(240px,1fr));
+  gap: .65rem; margin: .75rem 0;
+}
+.feature-card {
+  display: flex; align-items: flex-start; gap: .55rem;
+  border: 1px solid rgba(128,128,128,.1); border-radius: 8px; padding: .6rem .8rem;
+}
+.feature-icon { font-size: 1.2rem; }
+.feature-text { font-size: .88rem; line-height: 1.35; opacity: .8; }
+
+/* ── Overlay pills ── */
+.overlay-pill {
+  display: inline-block; padding: .3rem .65rem; border-radius: 999px;
+  font-size: .82rem; border: 1px solid rgba(128,128,128,.15);
+  margin: .2rem .2rem 0 0;
+}
+.overlay-sub { font-size: 1rem; opacity: .85; margin-bottom: .5rem; }
+
+/* ── Sidebar ── */
+[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h3 { margin-bottom: 0; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -293,31 +175,18 @@ NODES = [
 ]
 NODE_KEYS = [n["key"] for n in NODES]
 
-# ============================================================================
-# Splash  ★ REVISED: reduced from 1.2s → 0.5s
-# ============================================================================
-if "splash_done" not in st.session_state:
-    placeholder = st.empty()
-    with placeholder.container():
-        st.markdown(
-            """
-            <div class="center-wrap fade-enter">
-              <div>
-                <div class="brand-title">KōreroNET</div>
-                <div class="brand-sub">AUT</div>
-                <div class="pulse"></div>
-                <div class="small" style="margin-top:10px;">initialising…</div>
-              </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    time.sleep(0.5)  # ★ was 1.2
-    st.session_state["splash_done"] = True
-    st.rerun()
+
 
 # ============================================================================
-# Utility: unique keys + live toggle
+# Utility: unique keys
+# ============================================================================
+if "_sess_salt" not in st.session_state:
+    st.session_state["_sess_salt"] = str(uuid.uuid4())[:8]
+
+def k(name: str) -> str:
+    return f"{name}::{st.session_state['_sess_salt']}"
+
+
 # ============================================================================
 if "_sess_salt" not in st.session_state:
     st.session_state["_sess_salt"] = str(uuid.uuid4())[:8]
@@ -357,30 +226,6 @@ def _secret_or_env(name: str, default=None):
 
 # If offline, map "Drive root id" to local clone path; otherwise read from env/secrets.
 GDRIVE_FOLDER_ID = ROOT_LOCAL if OFFLINE_DEPLOY else _secret_or_env("GDRIVE_FOLDER_ID", None)
-
-# Top bar — Node Select + manual refresh
-row_top = st.columns([3,2])
-with row_top[0]:
-    node = st.selectbox("Active node", NODE_KEYS, index=0, key="node_select_top")
-    # ★ FIX: sync top-bar selector to active_node state
-    if node != st.session_state.get("active_node"):
-        st.session_state["active_node"] = node
-with row_top[1]:
-    if st.button("↻ Refresh data", key=k("btn_refresh_drive"), help="Clear caches & re-index Drive/local data"):
-        try:
-            st.cache_data.clear()
-            # ★ FIX: only clear Drive-related session keys (was nuking welcome state, tab state, etc.)
-            for _k in list(st.session_state.keys()):
-                if str(_k).startswith("drive_kids::") or str(_k).startswith("DRIVE_EPOCH"):
-                    del st.session_state[_k]
-            # Also reset verify lazy-load so it re-fetches
-            st.session_state.pop("verify_loaded", None)
-            st.rerun()
-        except Exception as e:
-            # ★ Don't catch RerunException here
-            if type(e).__name__ in ("RerunException", "StopException", "RerunData"):
-                raise
-            st.warning(f"Refresh encountered a non-fatal error: {e!s}")
 
 
 # ============================================================================
@@ -668,6 +513,7 @@ def extract_dates_from_csv(path: str | Path) -> List[date]:
 def build_date_index(paths: List[Path], kind: str) -> Dict[date, List[str]]:
     idx: Dict[date, List[str]] = {}
     for p in paths:
+
         ds = extract_dates_from_csv(p)
         for d in ds:
             idx.setdefault(d, []).append(str(p))
@@ -864,6 +710,7 @@ def build_master_index_by_snapshot_date(root_folder_id: str, cache_epoch: str, n
                     frames.append(df)
                 except Exception:
                     pass
+
 
             bn_legacy = [f for f in files_only if _match_legacy_master_name(f.get("name",""), "BN")]
             if not bn_legacy:
@@ -1098,6 +945,7 @@ if OFFLINE_DEPLOY:
                     return sorted(cands, key=lambda p: p.stat().st_mtime, reverse=True)[:1]
 
                 kn_legacy = _find_legacy("KN")
+
                 if kn_legacy:
                     try:
                         df = pd.read_csv(kn_legacy[0])
@@ -1168,132 +1016,6 @@ def _join_top(items: List[Tuple[str, int]]) -> str:
     if len(parts) == 2: return " and ".join(parts)
     return f"{', '.join(parts[:-1])}, and {parts[-1]}"
 
-# ★ REVISED: added ttl + max_entries
-@st.cache_data(ttl=300, max_entries=5, show_spinner=False)
-def _latest_root_summary(root_id_or_path: str, live: bool) -> Tuple[Optional[str], Optional[date], pd.DataFrame]:
-    """Returns (mode_label, chosen_date, merged_df_for_that_day)."""
-    cache_epoch = st.session_state.get("DRIVE_EPOCH", "0")
-    if drive_enabled():
-        bn_meta, kn_meta = list_csvs_drive_root(root_id_or_path, cache_epoch=cache_epoch)
-        if bn_meta or kn_meta:
-            bn_paths = [ensure_csv_cached(m, subdir="root/bn", cache_epoch=cache_epoch, force=live) for m in bn_meta]
-            kn_paths = [ensure_csv_cached(m, subdir="root/kn", cache_epoch=cache_epoch, force=live) for m in kn_meta]
-        else:
-            bn_paths, kn_paths = [], []
-    else:
-        bn_local, kn_local = list_csvs_local(ROOT_LOCAL)
-        bn_paths = [Path(p) for p in bn_local]
-        kn_paths = [Path(p) for p in kn_local]
-
-    bn_by_date = build_date_index(bn_paths, "bn") if bn_paths else {}
-    kn_by_date = build_date_index(kn_paths, "kn") if kn_paths else {}
-
-    if not bn_by_date and not kn_by_date:
-        return None, None, pd.DataFrame()
-
-    bn_dates = set(bn_by_date.keys())
-    kn_dates = set(kn_by_date.keys())
-    both     = sorted(bn_dates & kn_dates)
-    either   = sorted(bn_dates | kn_dates)
-
-    if both:
-        chosen = both[-1]
-        mode_label = "Combined"
-    else:
-        chosen = either[-1]
-        mode_label = "BirdNET (bn)" if chosen in bn_dates else "KōreroNET (kn)"
-
-    def _load_and_filter(paths: List[Path], kind: str, day_selected: date):
-        frames = []
-        for p in paths:
-            try:
-                raw = load_csv(p)
-                std = standardize_root_df(raw, kind)
-                std = std[std["ActualTime"].dt.date == day_selected]
-                if not std.empty: frames.append(std)
-            except Exception:
-                pass
-        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-
-    df_bn = _load_and_filter(bn_by_date.get(chosen, []), "bn", chosen) if chosen in bn_by_date else pd.DataFrame()
-    df_kn = _load_and_filter(kn_by_date.get(chosen, []), "kn", chosen) if chosen in kn_by_date else pd.DataFrame()
-    merged = pd.concat([df_bn, df_kn], ignore_index=True) if not df_bn.empty or not df_kn.empty else (df_bn if not df_bn.empty else df_kn)
-
-    return mode_label, chosen, merged
-
-# Welcome overlay — blocks tabs until user clicks Continue
-def _render_welcome_overlay():
-    if st.session_state.get("__welcome_done__", False):
-        return
-    with st.spinner("Summarising latest detections…"):
-        mode, chosen_date, df = _latest_root_summary(GDRIVE_FOLDER_ID, False)
-    overlay = st.empty()
-    with overlay.container():
-        st.markdown('<div class="overlay-card">', unsafe_allow_html=True)
-        st.markdown('<div class="overlay-title">KōreroNET</div>', unsafe_allow_html=True)
-
-        # Top Continue CTA
-        st.markdown('<div class="overlay-cta-top">', unsafe_allow_html=True)
-        cta_top = st.button("Continue →", type="primary", key=k("welcome_continue_top"))
-        if cta_top:
-            st.session_state["__welcome_done__"] = True
-            st.rerun()
-        st.markdown('</div>', unsafe_allow_html=True)
-        st.markdown('<div class="overlay-cta-hint">Click <b>Continue</b> to enter the dashboard.</div>', unsafe_allow_html=True)
-
-        # Technology highlights
-        st.markdown('<div class="overlay-sub">Our Technology Highlights</div>', unsafe_allow_html=True)
-        features: List[Tuple[str, str]] = [
-            ('🔊', 'Bioacoustic monitoring of all vocal species in New Zealand wildlife.'),
-            ('🎧', 'Full-spectrum recording: ultrasonic and audible ranges.'),
-            ('🤖', 'Autonomous detection powered by our in‑house AI models.'),
-            ('🎛️', 'On‑device edge computing and recording in a single package.'),
-            ('📡', 'Deployable in remote areas with flexible connectivity.'),
-            ('📶', 'Supports LoRaWAN, Wi‑Fi and LTE networking.'),
-            ('☀️', 'Solar‑powered and weather‑sealed for harsh environments.'),
-            ('⚡', 'Energy‑efficient: records and processes in intervals to save power.'),
-            ('🐦', 'Detects both pests and birds of interest.'),
-            ('📁', 'Provides accessible recordings of species of interest.')
-        ]
-        feature_html = '<div class="features-grid">'
-        for icon, text in features:
-            feature_html += f'<div class="feature-card"><div class="feature-icon">{icon}</div><div class="feature-text">{text}</div></div>'
-        feature_html += '</div>'
-        st.markdown(feature_html, unsafe_allow_html=True)
-
-        st.markdown('<hr style="border:0; border-top:1px solid rgba(255,255,255,.06); margin:1.5rem 0;">', unsafe_allow_html=True)
-
-        # Latest field summary
-        st.markdown('<div class="overlay-sub">Latest Field Summary</div>', unsafe_allow_html=True)
-        if df is None or df.empty or chosen_date is None:
-            st.markdown('<div class="overlay-sub">No parsable detections found in the most recent root CSVs.</div>', unsafe_allow_html=True)
-        else:
-            counts = df["Label"].astype(str).value_counts()
-            top = [(lbl, int(counts[lbl])) for lbl in counts.index[:3]]
-            nice_day = _human_day(chosen_date)
-            sentence = f"{nice_day} we detected {_join_top(top)}."
-            st.markdown(f'<div class="overlay-sub">{sentence}</div>', unsafe_allow_html=True)
-            total = int(counts.sum())
-            uniq  = int(counts.shape[0])
-            st.markdown(f"""
-                <div class="overlay-pill">Mode: {mode or '—'}</div>
-                <div class="overlay-pill">Date: {chosen_date.isoformat() if chosen_date else '—'}</div>
-                <div class="overlay-pill">Detections: {total:,}</div>
-                <div class="overlay-pill">Species: {uniq:,}</div>
-            """, unsafe_allow_html=True)
-
-        # Bottom Continue CTA
-        c1, c2 = st.columns([1, 5])
-        with c1:
-            if st.button("Continue →", type="primary", key=k("welcome_continue")):
-                st.session_state["__welcome_done__"] = True
-                st.rerun()
-
-        st.markdown('</div>', unsafe_allow_html=True)
-    st.stop()
-
-# Show the overlay once per session (after splash, before tabs)
-_render_welcome_overlay()
 
 # ★ REVISED: added ttl + max_entries
 @st.cache_data(ttl=300, max_entries=10, show_spinner=False)
@@ -1321,34 +1043,196 @@ def find_subfolder_by_name(root_id: str, name_ci: str) -> Optional[Dict[str, Any
             return kid
     return None
 
-# ============================================================================
-# Tabs
-# ============================================================================
-tab_nodes, tab1, tab_verify, tab3, tab4, tab_search = st.tabs([
-    "🗺️ Nodes", "📊 Detections", "🎧 Verify recordings", "⚡ Power", "📋 Log", "🔍 Search"
-])
 
-# ==================================
-# TAB — Nodes (stable map fallback)
-# ==================================
-with tab_nodes:
+
+# ============================================================================
+# Power log helpers (moved to module level)
+# ============================================================================
+LOG_RE = re.compile(r"^power_history_(\d{8})_(\d{6})\.log$", re.IGNORECASE)
+
+@st.cache_data(ttl=300, max_entries=10, show_spinner=False)
+def list_power_logs(folder_id: str, cache_epoch: str, nocache: str = "stable") -> List[Dict[str, Any]]:
+    kids = list_children(folder_id, max_items=2000)
+    files = [k for k in kids if k.get("mimeType") != "application/vnd.google-apps.folder" and LOG_RE.match(k.get("name",""))]
+    files.sort(key=lambda m: m.get("name",""), reverse=True)
+    return files
+
+@st.cache_data(ttl=300, max_entries=10, show_spinner=False)
+def ensure_log_cached(meta: Dict[str, Any], force: bool = False) -> Path:
+    local_path = POWER_CACHE / meta["name"]
+    return download_to(local_path, meta["id"], force=force)
+
+def _parse_float_list(line: str) -> List[float]:
+    try:
+        payload = line.split(",", 1)[1]
+    except Exception:
+        return []
+    vals = []
+    for tok in payload.strip().split(","):
+        tok = tok.strip().rstrip(".")
+        try:
+            vals.append(float(tok))
+        except Exception:
+            pass
+    return vals
+
+def parse_power_log(path: Path) -> Optional[pd.DataFrame]:
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return None
+    lines_raw = [l.strip() for l in text.splitlines() if l.strip()]
+    if not lines_raw: return None
+
+    head_dt = None
+    for l in lines_raw[:3]:
+        m = re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", l)
+        if m:
+            try:
+                head_dt = datetime.strptime(m.group(0), "%Y-%m-%d %H:%M:%S")
+                break
+            except Exception:
+                pass
+    if head_dt is None:
+        return None
+
+    wh_line   = next((l for l in lines_raw if l.upper().startswith("PH_WH")),   "")
+    mah_line  = next((l for l in lines_raw if l.upper().startswith("PH_MAH")),  "")
+    soci_line = next((l for l in lines_raw if l.upper().startswith("PH_SOCI")), "")
+    socv_line = next((l for l in lines_raw if l.upper().startswith("PH_SOCV")), "")
+
+    WH   = _parse_float_list(wh_line)
+    mAh  = _parse_float_list(mah_line)
+    SoCi = _parse_float_list(soci_line)
+    SoCv = _parse_float_list(socv_line)
+
+    L = max(len(WH), len(mAh), len(SoCi), len(SoCv))
+    if L == 0: return None
+
+    def _pad_left(arr, n):
+        return [np.nan]*(n-len(arr)) + arr if len(arr) < n else arr[:n]
+
+    WH, mAh, SoCi, SoCv = _pad_left(WH,L), _pad_left(mAh,L), _pad_left(SoCi,L), _pad_left(SoCv,L)
+    times = [head_dt - timedelta(hours=(L-1 - i)) for i in range(L)]
+    df = pd.DataFrame({"t": times, "PH_WH": WH, "PH_mAh": mAh, "PH_SoCi": SoCi, "PH_SoCv": SoCv})
+
+    eps = 1e-9
+    mask = (np.abs(df["PH_WH"])<eps) & (np.abs(df["PH_mAh"])<eps) & (np.abs(df["PH_SoCi"])<eps) & (np.abs(df["PH_SoCv"])<eps)
+    return df[~mask].reset_index(drop=True)
+
+
+# ============================================================================
+# Helper: humanize chunk filenames
+# ============================================================================
+def _humanize_chunk(chunk_name: str) -> Dict[str, str]:
+    """Parse a chunk filename into human-readable fields."""
+    info = _parse_chunk_filename(chunk_name) if 'CHUNK_RE' in dir() else None
+    m = CHUNK_RE.match(chunk_name or "")
+    if not m:
+        return {"species": chunk_name, "confidence": "—", "segment": "—", "date": "—", "source": "—"}
+    try:
+        root = m.group("root")
+        tag = m.group("tag").upper()
+        s = float(m.group("s"))
+        e = float(m.group("e"))
+        label = m.group("label").replace("_", " ")
+        conf = float(m.group("conf"))
+        # Parse date from root (YYYYMMDD_HHMMSS)
+        try:
+            dt = datetime.strptime(root, "%Y%m%d_%H%M%S")
+            date_str = dt.strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            date_str = root
+        return {
+            "species": label,
+            "confidence": f"{conf:.1%}",
+            "segment": f"{s:.1f}s → {e:.1f}s",
+            "date": date_str,
+            "source": "KōreroNET" if tag == "KN" else "BirdNET",
+        }
+    except Exception:
+        return {"species": chunk_name, "confidence": "—", "segment": "—", "date": "—", "source": "—"}
+
+
+# ============================================================================
+# SIDEBAR NAVIGATION
+# ============================================================================
+with st.sidebar:
+    st.markdown("### 🐦 KōreroNET")
+    st.caption("Bird Acoustic Monitoring")
+    st.divider()
+
+    page = st.radio(
+        "Navigation",
+        ["🗺️ Nodes", "📊 Detections", "🎧 Verify", "⚡ Power", "📋 Log", "🔍 Search"],
+        label_visibility="collapsed",
+    )
+
+    st.divider()
+    node = st.selectbox("Active node", NODE_KEYS, index=0, key="node_select_top")
+    if node != st.session_state.get("active_node"):
+        st.session_state["active_node"] = node
+
+    if st.button("↻ Refresh data", use_container_width=True, key=k("btn_refresh")):
+        try:
+            st.cache_data.clear()
+            for _k in list(st.session_state.keys()):
+                if str(_k).startswith("drive_kids::") or str(_k).startswith("DRIVE_EPOCH"):
+                    del st.session_state[_k]
+            st.session_state.pop("verify_loaded", None)
+            st.rerun()
+        except Exception as e:
+            if type(e).__name__ in ("RerunException", "StopException", "RerunData"):
+                raise
+            st.warning(f"Refresh error: {e!s}")
+
+    st.divider()
+
+    # Quick summary in sidebar
+    try:
+        mode, chosen_date, df_summary = _latest_root_summary(GDRIVE_FOLDER_ID, False)
+        if df_summary is not None and not df_summary.empty and chosen_date is not None:
+            counts_sb = df_summary["Label"].astype(str).value_counts()
+            top_sp = counts_sb.index[0] if len(counts_sb) > 0 else "—"
+            st.caption(f"Latest: {_human_day(chosen_date)}")
+            st.caption(f"Top species: **{top_sp}** ({int(counts_sb.iloc[0]):,})")
+            st.caption(f"Total: {int(counts_sb.sum()):,} detections")
+    except Exception:
+        pass
+
+    st.divider()
+    st.caption("v2.0 · AUT · KōreroNET")
+
+
+# ============================================================================
+# Helper: load CSV index (shared by Detections + Search)
+# ============================================================================
+@st.cache_data(ttl=300, max_entries=5, show_spinner=False)
+def _load_csv_index(_epoch: str):
+    """Load and index all root CSVs. Returns (bn_paths, kn_paths, bn_by_date, kn_by_date)."""
+    if drive_enabled():
+        bn_meta, kn_meta = list_csvs_drive_root(GDRIVE_FOLDER_ID, cache_epoch=_epoch, nocache="stable")
+        bn_paths = [str(ensure_csv_cached(m, subdir="root/bn", cache_epoch=_epoch, force=False)) for m in bn_meta]
+        kn_paths = [str(ensure_csv_cached(m, subdir="root/kn", cache_epoch=_epoch, force=False)) for m in kn_meta]
+    else:
+        bn_local, kn_local = list_csvs_local(ROOT_LOCAL)
+        bn_paths, kn_paths = list(bn_local), list(kn_local)
+    bn_by_date = build_date_index(bn_paths, "bn") if bn_paths else {}
+    kn_by_date = build_date_index(kn_paths, "kn") if kn_paths else {}
+    return bn_paths, kn_paths, bn_by_date, kn_by_date
+
+
+# ============================================================================
+# PAGE: Nodes
+# ============================================================================
+if page == "🗺️ Nodes":
     st.markdown("#### Node locations")
-    st.markdown('<p class="kn-muted">Select a node to centre the map. Additional nodes will appear as the network grows.</p>', unsafe_allow_html=True)
 
     _df_nodes = pd.DataFrame(
         [{"lat": n["lat"], "lon": n["lon"], "name": n["name"], "key": n["key"], "desc": n["desc"]} for n in NODES]
     )
-
-    default_active = (
-        st.session_state.get("active_node")
-        or st.session_state.get("node_select_top")
-        or NODE_KEYS[0]
-    )
     if "active_node" not in st.session_state:
-        st.session_state["active_node"] = default_active
-
-    # ★ FIX: removed duplicate selector. Use the "Active node" dropdown at the top of the page.
-    st.markdown('<p class="kn-muted">Change the active node using the dropdown at the top of the page.</p>', unsafe_allow_html=True)
+        st.session_state["active_node"] = NODE_KEYS[0]
 
     try:
         _center = _df_nodes[_df_nodes["key"] == st.session_state["active_node"]][["lat", "lon"]].iloc[0].to_dict()
@@ -1356,616 +1240,444 @@ with tab_nodes:
     except Exception:
         center_lat, center_lon = -36.9003, 174.8839
 
-# Map fallbacks (folium → pydeck → plain plotly)
-with tab_nodes:
-    col_l, col_mid, col_r = st.columns([1, 24, 1])
-    with col_mid:
+    # Map + status side by side
+    col_map, col_status = st.columns([3, 1])
+
+    with col_map:
         rendered = False
         try:
             import folium
             from streamlit_folium import st_folium
-            # ★ REVISED: cleaner tile layer
             m = folium.Map(location=[center_lat, center_lon], zoom_start=13, control_scale=True, tiles="CartoDB Positron")
             for _, r in _df_nodes.iterrows():
-                folium.Circle(location=[float(r["lat"]), float(r["lon"])], radius=150,
-                              color=None, fill=True, fill_opacity=0.18, fill_color="#ff0000").add_to(m)
-                folium.CircleMarker(location=[float(r["lat"]), float(r["lon"])], radius=16,
-                                    color=None, fill=True, fill_color="#ffffff", fill_opacity=1.0).add_to(m)
-                folium.CircleMarker(location=[float(r["lat"]), float(r["lon"])], radius=14,
-                                    color=None, fill=True, fill_color="#dc143c", fill_opacity=0.95,
-                                    tooltip=f"<b>{r['name']}</b><br>{r['desc']}").add_to(m)
-            st_folium(m, width=950, height=520, returned_objects=[])
+                folium.CircleMarker(
+                    location=[float(r["lat"]), float(r["lon"])], radius=12,
+                    color="#2E7D32", fill=True, fill_color="#4CAF50", fill_opacity=0.8,
+                    tooltip=f"<b>{r['name']}</b><br>{r['desc']}",
+                ).add_to(m)
+            st_folium(m, width=None, height=480, returned_objects=[])
             rendered = True
-        except Exception as _e:
-            pass  # ★ folium not installed, try pydeck next
-
+        except Exception:
+            pass
         if not rendered:
             try:
                 import pydeck as pdk
-                halo = pdk.Layer("ScatterplotLayer", data=_df_nodes, get_position='[lon, lat]',
-                                 get_radius=180, get_fill_color='[255,0,0,46]', pickable=False)
-                white = pdk.Layer("ScatterplotLayer", data=_df_nodes, get_position='[lon, lat]',
-                                  get_radius=24, get_fill_color='[255,255,255,255]', pickable=False)
-                main = pdk.Layer("ScatterplotLayer", data=_df_nodes, get_position='[lon, lat]',
-                                 get_radius=20, get_fill_color='[220,20,60,242]', pickable=True)
+                layer = pdk.Layer("ScatterplotLayer", data=_df_nodes, get_position='[lon, lat]',
+                                 get_radius=60, get_fill_color='[46,125,50,220]', pickable=True)
                 view = pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=12)
-                st.pydeck_chart(
-                    pdk.Deck(layers=[halo, white, main], initial_view_state=view,
-                             map_style=None, tooltip={"text": "{name}\n{desc}"}),
-                    use_container_width=True,
-                )
+                st.pydeck_chart(pdk.Deck(layers=[layer], initial_view_state=view,
+                                         tooltip={"text": "{name}\n{desc}"}), use_container_width=True)
                 rendered = True
-            except Exception as _e:
-                st.caption("⚠️ Interactive map unavailable — using static fallback.")
-
+            except Exception:
+                st.caption("⚠️ Interactive map unavailable — using fallback.")
         if not rendered:
-            import plotly.graph_objects as go
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=_df_nodes["lon"], y=_df_nodes["lat"], mode="markers",
-                                     marker=dict(size=30, color="rgba(255,0,0,0.18)"),
-                                     hoverinfo="skip", showlegend=False))
-            fig.add_trace(go.Scatter(x=_df_nodes["lon"], y=_df_nodes["lat"], mode="markers",
-                                     marker=dict(size=22, color="white"),
-                                     hoverinfo="skip", showlegend=False))
-            fig.add_trace(go.Scatter(x=_df_nodes["lon"], y=_df_nodes["lat"], mode="markers+text",
-                                     marker=dict(size=18, color="crimson"),
-                                     text=_df_nodes["name"], textposition="top center",
-                                     hovertext=_df_nodes["desc"], hoverinfo="text",
-                                     showlegend=False))
-            fig.update_layout(height=520, margin=dict(l=10, r=10, t=10, b=0),
-                              xaxis_title="Longitude", yaxis_title="Latitude")
+            fig = go.Figure(go.Scattermapbox(
+                lat=_df_nodes["lat"], lon=_df_nodes["lon"], mode="markers",
+                marker=dict(size=14, color="#4CAF50"), text=_df_nodes["name"], hoverinfo="text",
+            ))
+            fig.update_layout(mapbox=dict(style="open-street-map", center=dict(lat=center_lat, lon=center_lon), zoom=12),
+                              height=480, margin=dict(l=0,r=0,t=0,b=0))
             st.plotly_chart(fig, use_container_width=True)
 
+    with col_status:
+        st.markdown("##### Node status")
+        # Try to get latest power data for status
+        try:
+            if drive_enabled():
+                logs_folder = find_subfolder_by_name(GDRIVE_FOLDER_ID, "Power logs")
+                if logs_folder:
+                    cache_epoch = st.session_state.get("DRIVE_EPOCH", "0")
+                    p_files = list_power_logs(logs_folder["id"], cache_epoch=cache_epoch)
+                    if p_files:
+                        local = ensure_log_cached(p_files[0], force=False)
+                        pdf = parse_power_log(local)
+                        if pdf is not None and not pdf.empty:
+                            last = pdf.iloc[-1]
+                            st.metric("Status", "🟢 Online")
+                            st.metric("Battery (SoC)", f"{last['PH_SoCi']:.0f}%")
+                            st.metric("Energy", f"{last['PH_WH']:.1f} Wh")
+                            st.metric("Last data", pdf["t"].max().strftime("%H:%M, %d %b"))
+                        else:
+                            st.metric("Status", "⚠️ No data")
+                    else:
+                        st.metric("Status", "⚠️ No logs")
+                else:
+                    st.metric("Status", "⚠️ No logs folder")
+            else:
+                st.metric("Status", "Offline mode")
+        except Exception:
+            st.metric("Status", "⚠️ Unknown")
 
-# =========================
-# TAB 1 — Detections (root)
-# =========================
-with tab1:
+    # Technology highlights
+    with st.expander("About KōreroNET", expanded=False):
+        features = [
+            ('🔊', 'Bioacoustic monitoring of all vocal species in New Zealand wildlife.'),
+            ('🎧', 'Full-spectrum recording: ultrasonic and audible ranges.'),
+            ('🤖', 'Autonomous detection powered by our in-house AI models.'),
+            ('🎛️', 'On-device edge computing and recording in a single package.'),
+            ('📡', 'Deployable in remote areas with flexible connectivity.'),
+            ('📶', 'Supports LoRaWAN, Wi-Fi and LTE networking.'),
+            ('☀️', 'Solar-powered and weather-sealed for harsh environments.'),
+            ('⚡', 'Energy-efficient: records and processes in intervals to save power.'),
+            ('🐦', 'Detects both pests and birds of interest.'),
+            ('📁', 'Provides accessible recordings of species of interest.')
+        ]
+        feat_html = '<div class="features-grid">'
+        for icon, text in features:
+            feat_html += f'<div class="feature-card"><div class="feature-icon">{icon}</div><div class="feature-text">{text}</div></div>'
+        feat_html += '</div>'
+        st.markdown(feat_html, unsafe_allow_html=True)
+
+
+# ============================================================================
+# PAGE: Detections (reactive — no Update button)
+# ============================================================================
+elif page == "📊 Detections":
     st.markdown("#### Species detections")
-    st.markdown('<p class="kn-muted">Heatmap of detections by species and hour. Filter by source, date, and confidence.</p>', unsafe_allow_html=True)
+    st.caption("Heatmap of detections by species and hour. Filters auto-apply.")
 
-    cache_epoch = st.session_state.get("DRIVE_EPOCH", "0")
-    if drive_enabled():
-        bn_meta, kn_meta = list_csvs_drive_root(GDRIVE_FOLDER_ID, cache_epoch=cache_epoch, nocache="stable")
-    else:
-        bn_meta, kn_meta = [], []
-
-    force_live = False
-    if drive_enabled() and (bn_meta or kn_meta):
-        bn_paths = [ensure_csv_cached(m, subdir="root/bn", cache_epoch=cache_epoch, force=force_live) for m in bn_meta]
-        kn_paths = [ensure_csv_cached(m, subdir="root/kn", cache_epoch=cache_epoch, force=force_live) for m in kn_meta]
-    else:
-        bn_local, kn_local = list_csvs_local(ROOT_LOCAL)
-        bn_paths = [Path(p) for p in bn_local]
-        kn_paths = [Path(p) for p in kn_local]
-
-    bn_by_date = build_date_index(bn_paths, "bn") if bn_paths else {}
-    kn_by_date = build_date_index(kn_paths, "kn") if kn_paths else {}
+    epoch = st.session_state.get("DRIVE_EPOCH", "0")
+    bn_paths, kn_paths, bn_by_date, kn_by_date = _load_csv_index(epoch)
 
     bn_dates = sorted(bn_by_date.keys())
     kn_dates = sorted(kn_by_date.keys())
-    paired_dates = sorted(set(bn_dates).intersection(set(kn_dates)))
+    paired_dates = sorted(set(bn_dates) & set(kn_dates))
 
-    # ★ REVISED: wrap controls in st.form → one rerun on submit, not per widget
-    with st.form(key=k("tab1_form")):
-        fc1, fc2, fc3 = st.columns([2, 2, 1])
-        with fc1:
-            src = st.selectbox("Source", ["KōreroNET (kn)", "BirdNET (bn)", "Combined"], index=0)
-        with fc3:
-            min_conf = st.slider("Minimum confidence", 0.0, 1.0, 0.95, 0.01)
+    fc1, fc2, fc3 = st.columns([2, 2, 1])
+    with fc1:
+        src = st.selectbox("Source", ["KōreroNET (kn)", "BirdNET (bn)", "Combined"], index=0, key=k("det_src"))
+    with fc3:
+        min_conf = st.slider("Min confidence", 0.0, 1.0, 0.90, 0.01, key=k("det_conf"))
 
-        if src == "Combined":
-            options, help_txt = paired_dates, "Only dates with both BN & KN detections."
-        elif src == "BirdNET (bn)":
-            options, help_txt = bn_dates, "Dates present in any BN file."
-        else:
-            options, help_txt = kn_dates, "Dates present in any KN file."
-
-        with fc2:
-            if options:
-                d_min, d_max = options[0], options[-1]
-                default_val = st.session_state.get(k("tab1_day") + "::last", d_max)
-                if default_val not in set(options):
-                    default_val = d_max
-                d = st.date_input("Day", value=default_val, min_value=d_min, max_value=d_max, help=help_txt)
-            else:
-                d = st.date_input("Day")
-
-        submitted = st.form_submit_button("Update heatmap", use_container_width=True)
+    if src == "Combined":
+        options = paired_dates
+    elif src == "BirdNET (bn)":
+        options = bn_dates
+    else:
+        options = kn_dates
 
     if not options:
         st.warning(f"No available dates for {src}.")
-        pass  # ★ FIX: removed st.stop() wall
+    else:
+        with fc2:
+            d = st.date_input("Day", value=options[-1], min_value=options[0], max_value=options[-1], key=k("det_day"))
 
-    # Snap to nearest available date
-    if d not in set(options):
-        earlier = [x for x in options if x <= d]
-        if earlier:
-            d = earlier[-1]
-            st.info(f"No data on chosen date; showing {d.isoformat()} (nearest earlier).")
-        else:
-            later = [x for x in options if x >= d]
-            d = later[0]
-            st.info(f"No data on chosen date; showing {d.isoformat()} (nearest later).")
-    st.session_state[k("tab1_day") + "::last"] = d
+        if d not in set(options):
+            earlier = [x for x in options if x <= d]
+            d = earlier[-1] if earlier else options[0]
+            st.caption(f"Snapped to nearest: **{d.isoformat()}**")
 
-    def load_and_filter(paths: List[Path], kind: str, day_selected: date):
-        frames = []
-        for p in paths:
-            try:
-                raw = load_csv(p)
-                std = standardize_root_df(raw, kind)
-                std = std[std["ActualTime"].dt.date == day_selected]
-                if not std.empty: frames.append(std)
-            except Exception:
-                pass
-        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        def _load_filter(kind, day):
+            idx = bn_by_date if kind == "bn" else kn_by_date
+            frames = []
+            for p in idx.get(day, []):
+                try:
+                    raw = load_csv(p)
+                    std = standardize_root_df(raw, kind)
+                    std = std[std["ActualTime"].dt.date == day]
+                    if not std.empty: frames.append(std)
+                except Exception:
+                    pass
+            return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
-    # ★ REVISED: better colorscale + metric cards below heatmap
-    def make_heatmap(df: pd.DataFrame, min_conf: float, title: str):
-        df_f = df[pd.to_numeric(df["Confidence"], errors="coerce").astype(float) >= float(min_conf)].copy()
-        if df_f.empty:
-            st.warning("No detections after applying the confidence filter.")
-            return
-        df_f["Hour"] = df_f["ActualTime"].dt.hour
-        hour_labels = {h: f"{(h % 12) or 12} {'AM' if h < 12 else 'PM'}" for h in range(24)}
-        order = [hour_labels[h] for h in range(24)]
-        df_f["HourLabel"] = df_f["Hour"].map(hour_labels)
-        pivot = df_f.groupby(["Label","HourLabel"]).size().unstack(fill_value=0).astype(int)
-        for lbl in order:
-            if lbl not in pivot.columns: pivot[lbl] = 0
-        pivot = pivot[order]
-        totals = pivot.sum(axis=1)
-        pivot = pivot.loc[totals.sort_values(ascending=False).index]
-        fig = px.imshow(
-            pivot.values, x=pivot.columns, y=pivot.index,
-            color_continuous_scale="YlOrRd",  # ★ was RdYlBu_r — better contrast for counts
-            labels=dict(x="Hour", y="Species", color="Count"),
-            text_auto=True, aspect="auto",
-        )
-        fig.update_layout(
-            title_text=title,
-            margin=dict(l=10, r=10, t=50, b=10),
-            coloraxis_colorbar=dict(thickness=14, len=0.6),
-        )
-        fig.update_xaxes(type="category")
-        st.plotly_chart(fig, use_container_width=True)
-
-        # ★ NEW: summary metric cards
-        st.markdown(f"""
-        <div class="kn-metrics">
-            <div class="kn-metric"><div class="kn-metric-val">{int(totals.sum()):,}</div><div class="kn-metric-label">Total detections</div></div>
-            <div class="kn-metric"><div class="kn-metric-val">{len(totals)}</div><div class="kn-metric-label">Species</div></div>
-            <div class="kn-metric"><div class="kn-metric-val">{min_conf:.0%}</div><div class="kn-metric-label">Confidence ≥</div></div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with st.spinner("Rendering heatmap…"):
         if src == "BirdNET (bn)":
-            df = load_and_filter(bn_by_date.get(d, []), "bn", d)
-            make_heatmap(df, min_conf, f"BirdNET — {d.isoformat()}")
+            df = _load_filter("bn", d)
+            title = f"BirdNET — {d.isoformat()}"
         elif src == "KōreroNET (kn)":
-            df = load_and_filter(kn_by_date.get(d, []), "kn", d)
-            make_heatmap(df, min_conf, f"KōreroNET — {d.isoformat()}")
+            df = _load_filter("kn", d)
+            title = f"KōreroNET — {d.isoformat()}"
         else:
-            df_bn = load_and_filter(bn_by_date.get(d, []), "bn", d)
-            df_kn = load_and_filter(kn_by_date.get(d, []), "kn", d)
-            make_heatmap(pd.concat([df_bn, df_kn], ignore_index=True), min_conf, f"Combined (BN+KN) — {d.isoformat()}")
+            df = pd.concat([_load_filter("bn", d), _load_filter("kn", d)], ignore_index=True)
+            title = f"Combined — {d.isoformat()}"
 
-# ================================
-# TAB 2 — Verify (snapshot date)
-# ================================
-with tab_verify:
-    def _render_verify_tab():
-        st.markdown("#### Verify recordings")
-        st.markdown('<p class="kn-muted">Pick a date, then browse and play audio chunks for that snapshot. Only the selected date is fetched from Drive.</p>', unsafe_allow_html=True)
+        df_f = df[pd.to_numeric(df.get("Confidence", 0), errors="coerce") >= min_conf].copy() if not df.empty else pd.DataFrame()
 
-        if not drive_enabled():
-            st.error("Google Drive is not configured. Add credentials in Streamlit secrets to enable this tab.")
-            return
+        if df_f.empty:
+            st.info("No detections above the confidence threshold for this date.")
+        else:
+            df_f["Hour"] = df_f["ActualTime"].dt.hour
+            hour_labels = {h: f"{(h%12) or 12} {'AM' if h<12 else 'PM'}" for h in range(24)}
+            order = [hour_labels[h] for h in range(24)]
+            df_f["HL"] = df_f["Hour"].map(hour_labels)
+            pivot = df_f.groupby(["Label","HL"]).size().unstack(fill_value=0).astype(int)
+            for lbl in order:
+                if lbl not in pivot.columns: pivot[lbl] = 0
+            pivot = pivot[order]
+            totals = pivot.sum(axis=1)
+            pivot = pivot.loc[totals.sort_values(ascending=False).index]
 
+            fig = px.imshow(pivot.values, x=pivot.columns, y=pivot.index,
+                            color_continuous_scale="YlOrRd",
+                            labels=dict(x="Hour", y="Species", color="Count"),
+                            text_auto=True, aspect="auto")
+            fig.update_layout(title_text=title, margin=dict(l=10,r=10,t=45,b=10),
+                              coloraxis_colorbar=dict(thickness=14, len=0.6))
+            fig.update_xaxes(type="category")
+            st.plotly_chart(fig, use_container_width=True)
+
+            st.markdown(f"""
+            <div class="kn-metrics">
+                <div class="kn-metric"><div class="kn-metric-val">{int(totals.sum()):,}</div><div class="kn-metric-label">Total detections</div></div>
+                <div class="kn-metric"><div class="kn-metric-val">{len(totals)}</div><div class="kn-metric-label">Species</div></div>
+                <div class="kn-metric"><div class="kn-metric-val">{min_conf:.0%}</div><div class="kn-metric-label">Confidence ≥</div></div>
+            </div>
+            """, unsafe_allow_html=True)
+
+
+# ============================================================================
+# PAGE: Verify (humanized chunks, progress bar)
+# ============================================================================
+elif page == "🎧 Verify":
+    st.markdown("#### Verify recordings")
+    st.caption("Pick a date, then browse and play audio chunks for that snapshot.")
+
+    if not drive_enabled():
+        st.error("Google Drive is not configured.")
+    else:
         NAV_COOLDOWN_SECONDS = 0.4
         if "tab2_last_play_ts" not in st.session_state:
             st.session_state["tab2_last_play_ts"] = 0.0
 
-        # Step 1 — list available snapshot dates (ONE cheap API call to Backup/)
         backup = _find_backup_folder(GDRIVE_FOLDER_ID)
         if not backup:
             st.warning("No `Backup` folder found under Drive root.")
-            return
-
-        snap_folders = [kid for kid in list_children(backup["id"], max_items=2000)
-                        if kid.get("mimeType") == "application/vnd.google-apps.folder"
-                        and SNAP_RE.match(kid.get("name", ""))]
-        snap_folders.sort(key=lambda m: m.get("name", ""), reverse=True)
-
-        if not snap_folders:
-            st.warning("No snapshot folders found in Backup/.")
-            return
-
-        snap_date_map = {}
-        for sf in snap_folders:
-            sd = _parse_date_from_snapname(sf["name"])
-            if sd:
-                snap_date_map[sd] = sf
-        avail_dates = sorted(snap_date_map.keys(), reverse=True)
-
-        if not avail_dates:
-            st.info("No valid snapshot dates found.")
-            return
-
-        # Step 2 — user picks date + source + confidence BEFORE any CSV download
-        fc1, fc2, fc3 = st.columns([2, 2, 1])
-        with fc1:
-            day_pick = st.date_input(
-                "Snapshot date", value=avail_dates[0],
-                min_value=avail_dates[-1], max_value=avail_dates[0],
-                key=k("tab2_day"),
-            )
-        with fc2:
-            src_mode_v = st.selectbox(
-                "Source", ["KoreroNET (KN)", "BirdNET (BN)", "Combined"],
-                index=0, key=k("tab2_src"),
-            )
-        with fc3:
-            min_conf_v = st.slider("Min confidence", 0.0, 1.0, 0.90, 0.01, key=k("tab2_min_conf"))
-
-        if day_pick not in snap_date_map:
-            nearest = min(avail_dates, key=lambda d: abs((d - day_pick).days))
-            day_pick = nearest
-            st.caption(f"Snapped to nearest available: **{day_pick.isoformat()}**")
-
-        sn = snap_date_map[day_pick]
-        snap_id, snap_name = sn["id"], sn["name"]
-        st.caption(f"Snapshot: `{snap_name}` — {len(avail_dates)} total dates available")
-
-        # Step 3 — fetch ONLY this one snapshot (fast: 1-3 API calls, not 426)
-        cache_epoch = st.session_state.get("DRIVE_EPOCH", "0")
-        snap_kids = list_children(snap_id, max_items=2000)
-        chunk_dirs = _find_chunk_dirs(snap_id, kids=snap_kids)
-
-        rows_frames = []
-
-        if day_pick >= CUTOFF_NEW:
-            for kind_key, csv_name in [("KN", "koreronet_master.csv"), ("BN", "birdnet_master.csv")]:
-                if src_mode_v == "KoreroNET (KN)" and kind_key == "BN":
-                    continue
-                if src_mode_v == "BirdNET (BN)" and kind_key == "KN":
-                    continue
-                meta = _find_named_in_snapshot(snap_id, csv_name, kids=snap_kids)
-                if not meta:
-                    continue
-                csv_path = ensure_csv_cached(meta, subdir=f"snap_{snap_id}/{kind_key.lower()}", cache_epoch=cache_epoch, force=False)
-                try:
-                    df = pd.read_csv(csv_path)
-                    label_col = "Label" if "Label" in df.columns else ("Common name" if "Common name" in df.columns else None)
-                    conf_col  = "Probability" if "Probability" in df.columns else ("Confidence" if "Confidence" in df.columns else None)
-                    frame = pd.DataFrame({
-                        "Kind": kind_key,
-                        "Label": df[label_col].astype(str) if label_col else "Unknown",
-                        "Confidence": pd.to_numeric(df[conf_col], errors="coerce") if conf_col else np.nan,
-                        "Start": np.nan, "End": np.nan, "WavBase": "",
-                        "ChunkName": df.get("Clip", "").astype(str).str.strip(),
-                        "ChunkDriveFolderId": chunk_dirs[kind_key],
-                    })
-                    rows_frames.append(frame)
-                except Exception:
-                    pass
         else:
-            for kind_key in (["KN", "BN"] if src_mode_v == "Combined" else
-                             ["KN"] if src_mode_v == "KoreroNET (KN)" else ["BN"]):
-                files_only = [f for f in snap_kids if f.get("mimeType") != "application/vnd.google-apps.folder"]
-                legacy = [f for f in files_only if _match_legacy_master_name(f.get("name",""), kind_key)]
-                if not legacy:
-                    for sf in [f for f in snap_kids if f.get("mimeType") == "application/vnd.google-apps.folder"]:
-                        cand = [f for f in list_children(sf["id"], max_items=2000)
-                                if f.get("mimeType") != "application/vnd.google-apps.folder"
-                                and _match_legacy_master_name(f.get("name",""), kind_key)]
-                        if cand:
-                            legacy = cand
-                            break
-                if not legacy:
-                    continue
-                legacy.sort(key=lambda m: m.get("modifiedTime",""), reverse=True)
-                csv_path = ensure_csv_cached(legacy[0], subdir=f"snap_{snap_id}/{kind_key.lower()}", cache_epoch=cache_epoch, force=False)
-                try:
-                    df = pd.read_csv(csv_path)
-                    wav_col = df.get("File", pd.Series(dtype=str)).astype(str).apply(os.path.basename)
-                    if kind_key == "BN":
-                        s_col = pd.to_numeric(df.get("Start (s)", df.get("Start", np.nan)), errors="coerce")
-                        e_col = pd.to_numeric(df.get("End (s)",   df.get("End",   np.nan)), errors="coerce")
-                        lab_col = df.get("Common name", df.get("Label", "Unknown")).astype(str)
-                    else:
-                        s_col = pd.to_numeric(df.get("Start", df.get("Start (s)", np.nan)), errors="coerce")
-                        e_col = pd.to_numeric(df.get("End",   df.get("End (s)",   np.nan)), errors="coerce")
-                        lab_col = df.get("Label", "Unknown").astype(str)
-                    conf_col = pd.to_numeric(df.get("Confidence", np.nan), errors="coerce")
-                    chunk_names = [_compose_chunk_name(kind_key.lower(), w, s, e, l, c)
-                                   for w, s, e, l, c in zip(wav_col, s_col, e_col, lab_col, conf_col)]
-                    frame = pd.DataFrame({
-                        "Kind": kind_key, "Label": lab_col,
-                        "Confidence": conf_col, "Start": s_col, "End": e_col,
-                        "WavBase": wav_col, "ChunkName": chunk_names,
-                        "ChunkDriveFolderId": chunk_dirs[kind_key],
-                    })
-                    rows_frames.append(frame)
-                except Exception:
-                    pass
+            snap_folders = [kid for kid in list_children(backup["id"], max_items=2000)
+                            if kid.get("mimeType") == "application/vnd.google-apps.folder"
+                            and SNAP_RE.match(kid.get("name", ""))]
+            snap_folders.sort(key=lambda m: m.get("name", ""), reverse=True)
 
-        if not rows_frames:
-            st.info(f"No detection data found for {day_pick.isoformat()} with source {src_mode_v}.")
-            return
+            if not snap_folders:
+                st.warning("No snapshot folders found.")
+            else:
+                snap_date_map = {}
+                for sf in snap_folders:
+                    sd = _parse_date_from_snapname(sf["name"])
+                    if sd: snap_date_map[sd] = sf
+                avail_dates = sorted(snap_date_map.keys(), reverse=True)
 
-        master = pd.concat(rows_frames, ignore_index=True)
-        master = master[pd.to_numeric(master["Confidence"], errors="coerce") >= float(min_conf_v)]
-
-        if master.empty:
-            st.info("No detections above the selected confidence for this date.")
-            return
-
-        # Step 4 — species + playback
-        counts = master.groupby("Label").size().sort_values(ascending=False)
-        species_list = list(counts.index)
-
-        st.markdown(f"""
-        <div class="kn-metrics">
-            <div class="kn-metric"><div class="kn-metric-val">{int(counts.sum()):,}</div><div class="kn-metric-label">Detections</div></div>
-            <div class="kn-metric"><div class="kn-metric-val">{len(species_list)}</div><div class="kn-metric-label">Species</div></div>
-            <div class="kn-metric"><div class="kn-metric-val">{min_conf_v:.0%}</div><div class="kn-metric-label">Confidence ≥</div></div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        species = st.selectbox(
-            "Species", options=species_list,
-            format_func=lambda s: f"{s} — {counts[s]:,} detections",
-            key=k("v_species"),
-        )
-
-        playlist = (
-            master[master["Label"] == species]
-            .sort_values(["Kind", "ChunkName"])
-            .reset_index(drop=True)
-        )
-
-        if playlist.empty:
-            st.info("No clips for this species.")
-            return
-
-        idx_key = f"v2_idx::{day_pick}::{src_mode_v}::{species}"
-        if idx_key not in st.session_state:
-            st.session_state[idx_key] = 0
-        idx = st.session_state[idx_key] % len(playlist)
-
-        col1, col2, col3, col4 = st.columns([1, 1, 1, 6])
-        do_play = False
-        with col1:
-            if st.button("⏮ Prev", key=k("tab2_prev"), use_container_width=True):
-                idx = (idx - 1) % len(playlist)
-        with col2:
-            if st.button("▶ Play", key=k("tab2_play"), type="primary", use_container_width=True):
-                now_ts = time.time()
-                if now_ts - st.session_state["tab2_last_play_ts"] >= NAV_COOLDOWN_SECONDS:
-                    st.session_state["tab2_last_play_ts"] = now_ts
-                    do_play = True
+                if not avail_dates:
+                    st.info("No valid snapshot dates found.")
                 else:
-                    st.info("Just a moment between plays to keep the server happy.")
-        with col3:
-            if st.button("⏭ Next", key=k("tab2_next"), use_container_width=True):
-                idx = (idx + 1) % len(playlist)
-        with col4:
-            st.markdown(f'<p class="kn-muted" style="padding-top:.6rem">{idx + 1} / {len(playlist)}</p>', unsafe_allow_html=True)
+                    fc1, fc2, fc3 = st.columns([2, 2, 1])
+                    with fc1:
+                        day_pick = st.date_input("Snapshot date", value=avail_dates[0],
+                                                  min_value=avail_dates[-1], max_value=avail_dates[0], key=k("v_day"))
+                    with fc2:
+                        src_mode_v = st.selectbox("Source", ["KoreroNET (KN)", "BirdNET (BN)", "Combined"], key=k("v_src"))
+                    with fc3:
+                        min_conf_v = st.slider("Min confidence", 0.0, 1.0, 0.90, 0.01, key=k("v_conf"))
 
-        st.session_state[idx_key] = idx
-        row = playlist.iloc[idx]
+                    if day_pick not in snap_date_map:
+                        nearest = min(avail_dates, key=lambda d: abs((d - day_pick).days))
+                        day_pick = nearest
+                        st.caption(f"Snapped to nearest: **{day_pick.isoformat()}**")
 
-        try:
-            conf_str = f"{float(row['Confidence']):.3f}"
-        except Exception:
-            conf_str = "n/a"
+                    sn = snap_date_map[day_pick]
+                    snap_id, snap_name = sn["id"], sn["name"]
 
-        st.markdown(f"""
-        <div class="kn-player">
-            <div class="kn-player-meta">
-                <strong>Chunk:</strong> {row['ChunkName']}<br>
-                <strong>Date:</strong> {day_pick} &nbsp;·&nbsp;
-                <strong>Source:</strong> {row['Kind']} &nbsp;·&nbsp;
-                <strong>Confidence:</strong> {conf_str}
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
+                    cache_epoch = st.session_state.get("DRIVE_EPOCH", "0")
+                    snap_kids = list_children(snap_id, max_items=2000)
+                    chunk_dirs = _find_chunk_dirs(snap_id, kids=snap_kids)
 
-        @_retry()
-        def _safe_chunk_cached(chunk_name, folder_id, subdir):
-            return ensure_chunk_cached(chunk_name, folder_id, subdir=subdir, force=False)
+                    rows_frames = []
+                    if day_pick >= CUTOFF_NEW:
+                        for kind_key, csv_name in [("KN", "koreronet_master.csv"), ("BN", "birdnet_master.csv")]:
+                            if src_mode_v == "KoreroNET (KN)" and kind_key == "BN": continue
+                            if src_mode_v == "BirdNET (BN)" and kind_key == "KN": continue
+                            meta = _find_named_in_snapshot(snap_id, csv_name, kids=snap_kids)
+                            if not meta: continue
+                            csv_path = ensure_csv_cached(meta, subdir=f"snap_{snap_id}/{kind_key.lower()}", cache_epoch=cache_epoch)
+                            try:
+                                df = pd.read_csv(csv_path)
+                                lc = "Label" if "Label" in df.columns else ("Common name" if "Common name" in df.columns else None)
+                                cc = "Probability" if "Probability" in df.columns else ("Confidence" if "Confidence" in df.columns else None)
+                                frame = pd.DataFrame({
+                                    "Kind": kind_key,
+                                    "Label": df[lc].astype(str) if lc else "Unknown",
+                                    "Confidence": pd.to_numeric(df[cc], errors="coerce") if cc else np.nan,
+                                    "Start": np.nan, "End": np.nan, "WavBase": "",
+                                    "ChunkName": df.get("Clip", "").astype(str).str.strip(),
+                                    "ChunkDriveFolderId": chunk_dirs[kind_key],
+                                })
+                                rows_frames.append(frame)
+                            except Exception:
+                                pass
+                    else:
+                        for kind_key in (["KN","BN"] if src_mode_v=="Combined" else ["KN"] if src_mode_v=="KoreroNET (KN)" else ["BN"]):
+                            files_only = [f for f in snap_kids if f.get("mimeType") != "application/vnd.google-apps.folder"]
+                            legacy = [f for f in files_only if _match_legacy_master_name(f.get("name",""), kind_key)]
+                            if not legacy:
+                                for sf in [f for f in snap_kids if f.get("mimeType") == "application/vnd.google-apps.folder"]:
+                                    cand = [f for f in list_children(sf["id"], max_items=2000)
+                                            if f.get("mimeType") != "application/vnd.google-apps.folder"
+                                            and _match_legacy_master_name(f.get("name",""), kind_key)]
+                                    if cand: legacy = cand; break
+                            if not legacy: continue
+                            legacy.sort(key=lambda m: m.get("modifiedTime",""), reverse=True)
+                            csv_path = ensure_csv_cached(legacy[0], subdir=f"snap_{snap_id}/{kind_key.lower()}", cache_epoch=cache_epoch)
+                            try:
+                                df = pd.read_csv(csv_path)
+                                wav_col = df.get("File", pd.Series(dtype=str)).astype(str).apply(os.path.basename)
+                                if kind_key == "BN":
+                                    s_col = pd.to_numeric(df.get("Start (s)", df.get("Start", np.nan)), errors="coerce")
+                                    e_col = pd.to_numeric(df.get("End (s)", df.get("End", np.nan)), errors="coerce")
+                                    lab_col = df.get("Common name", df.get("Label", "Unknown")).astype(str)
+                                else:
+                                    s_col = pd.to_numeric(df.get("Start", df.get("Start (s)", np.nan)), errors="coerce")
+                                    e_col = pd.to_numeric(df.get("End", df.get("End (s)", np.nan)), errors="coerce")
+                                    lab_col = df.get("Label", "Unknown").astype(str)
+                                conf_col = pd.to_numeric(df.get("Confidence", np.nan), errors="coerce")
+                                chunk_names = [_compose_chunk_name(kind_key.lower(), w, s, e, l, c)
+                                               for w, s, e, l, c in zip(wav_col, s_col, e_col, lab_col, conf_col)]
+                                frame = pd.DataFrame({
+                                    "Kind": kind_key, "Label": lab_col, "Confidence": conf_col,
+                                    "Start": s_col, "End": e_col, "WavBase": wav_col,
+                                    "ChunkName": chunk_names, "ChunkDriveFolderId": chunk_dirs[kind_key],
+                                })
+                                rows_frames.append(frame)
+                            except Exception:
+                                pass
 
-        if do_play:
-            try:
-                chunk_name = str(row.get("ChunkName", "") or "")
-                folder_id = str(row.get("ChunkDriveFolderId", "") or "")
-                kind = str(row.get("Kind", "UNK") or "")
-                if not chunk_name or not folder_id:
-                    st.warning("No chunk mapping available.")
-                    return
-                with st.spinner("Fetching audio…"):
-                    cached = _safe_chunk_cached(chunk_name, folder_id, subdir=kind)
-                if not cached or not cached.exists():
-                    st.warning("Audio chunk not found in Drive folder.")
-                    return
-                try:
-                    if cached.stat().st_size > 30 * 1024 * 1024:
-                        st.warning("Audio file too large to preview (>30 MB).")
-                        return
-                    with open(cached, "rb") as f:
-                        data = f.read()
-                except MemoryError:
-                    st.warning("Not enough memory to load audio preview.")
-                    return
-                except Exception as e:
-                    if type(e).__name__ in ("RerunException", "StopException", "RerunData"):
-                        raise
-                    st.warning(f"Cannot open audio chunk: {e!s}")
-                    return
-                st.audio(data, format="audio/wav")
-            except Exception as e:
-                if type(e).__name__ in ("RerunException", "StopException", "RerunData"):
-                    raise
-                st.warning(f"Playback error (non-fatal): {e!s}")
+                    if not rows_frames:
+                        st.info(f"No data for {day_pick.isoformat()} with source {src_mode_v}.")
+                    else:
+                        master = pd.concat(rows_frames, ignore_index=True)
+                        master = master[pd.to_numeric(master["Confidence"], errors="coerce") >= float(min_conf_v)]
 
-    _render_verify_tab()
+                        if master.empty:
+                            st.info("No detections above the selected confidence.")
+                        else:
+                            counts = master.groupby("Label").size().sort_values(ascending=False)
+                            species_list = list(counts.index)
 
-# =====================
-# TAB 3 — Power graph
-# =====================
-with tab3:
-    def _render_power_tab():  # ★ FIX: function wrapper
-        st.markdown("#### Node power history")
-        st.markdown('<p class="kn-muted">State of Charge and energy over the last 7 days, stitched from hourly power logs.</p>', unsafe_allow_html=True)
+                            species = st.selectbox("Species", species_list,
+                                                    format_func=lambda s: f"{s} — {counts[s]:,} detections", key=k("v_sp"))
 
-        if not drive_enabled():
-            st.error("Google Drive is not configured in secrets."); return  # ★ was st.stop()
+                            playlist = master[master["Label"] == species].sort_values(["Kind","ChunkName"]).reset_index(drop=True)
 
+                            if playlist.empty:
+                                st.info("No clips for this species.")
+                            else:
+                                idx_key = f"v_idx::{day_pick}::{src_mode_v}::{species}"
+                                if idx_key not in st.session_state:
+                                    st.session_state[idx_key] = 0
+                                idx = st.session_state[idx_key] % len(playlist)
+
+                                # Progress bar
+                                st.progress((idx + 1) / len(playlist))
+                                st.caption(f"Detection {idx + 1} of {len(playlist)}")
+
+                                col1, col2, col3 = st.columns([1, 1, 1])
+                                do_play = False
+                                with col1:
+                                    if st.button("⏮ Prev", key=k("v_prev"), use_container_width=True):
+                                        idx = (idx - 1) % len(playlist)
+                                with col2:
+                                    if st.button("▶ Play", key=k("v_play"), type="primary", use_container_width=True):
+                                        now_ts = time.time()
+                                        if now_ts - st.session_state["tab2_last_play_ts"] >= NAV_COOLDOWN_SECONDS:
+                                            st.session_state["tab2_last_play_ts"] = now_ts
+                                            do_play = True
+                                        else:
+                                            st.info("Just a moment between plays.")
+                                with col3:
+                                    if st.button("⏭ Next", key=k("v_next"), use_container_width=True):
+                                        idx = (idx + 1) % len(playlist)
+
+                                st.session_state[idx_key] = idx
+                                row = playlist.iloc[idx]
+
+                                # Humanized chunk display
+                                chunk_info = _humanize_chunk(str(row.get("ChunkName", "")))
+                                conf_val = float(row["Confidence"]) if pd.notna(row["Confidence"]) else 0
+
+                                c1, c2 = st.columns([1, 1])
+                                with c1:
+                                    st.markdown(f"**Species:** {chunk_info['species']}")
+                                    st.markdown(f"**Confidence:** {conf_val:.1%}")
+                                with c2:
+                                    st.markdown(f"**Segment:** {chunk_info['segment']}")
+                                    st.markdown(f"**Date:** {day_pick} · **Source:** {row['Kind']}")
+
+                                @_retry()
+                                def _safe_chunk(cn, fid, sd):
+                                    return ensure_chunk_cached(cn, fid, subdir=sd, force=False)
+
+                                if do_play:
+                                    try:
+                                        cn = str(row.get("ChunkName", "") or "")
+                                        fid = str(row.get("ChunkDriveFolderId", "") or "")
+                                        if not cn or not fid:
+                                            st.warning("No chunk mapping available.")
+                                        else:
+                                            with st.spinner("Fetching audio…"):
+                                                cached = _safe_chunk(cn, fid, row["Kind"])
+                                            if cached and cached.exists() and cached.stat().st_size > 0:
+                                                if cached.stat().st_size > 30*1024*1024:
+                                                    st.warning("Audio file too large (>30 MB).")
+                                                else:
+                                                    try:
+                                                        st.audio(cached.read_bytes(), format="audio/wav")
+                                                    except MemoryError:
+                                                        st.warning("Not enough memory for preview.")
+                                            else:
+                                                st.warning("Audio chunk not found.")
+                                    except Exception as e:
+                                        if type(e).__name__ in ("RerunException","StopException","RerunData"): raise
+                                        st.warning(f"Playback error: {e!s}")
+
+
+# ============================================================================
+# PAGE: Power (auto-load)
+# ============================================================================
+elif page == "⚡ Power":
+    st.markdown("#### Node power history")
+    st.caption("State of Charge and energy over the last 7 days.")
+
+    if not drive_enabled():
+        st.error("Google Drive is not configured.")
+    else:
         logs_folder = find_subfolder_by_name(GDRIVE_FOLDER_ID, "Power logs")
         if not logs_folder:
-            st.warning("Could not find 'Power logs' folder under the Drive root.")
-            return  # ★ was st.stop()
-
-        LOG_RE = re.compile(r"^power_history_(\d{8})_(\d{6})\.log$", re.IGNORECASE)
-
-        # ★ REVISED: added ttl + max_entries
-        @st.cache_data(ttl=300, max_entries=10, show_spinner=True)
-        def list_power_logs(folder_id: str, cache_epoch: str, nocache: str = "stable") -> List[Dict[str, Any]]:
-            kids = list_children(folder_id, max_items=2000)
-            files = [k for k in kids if k.get("mimeType") != "application/vnd.google-apps.folder" and LOG_RE.match(k.get("name",""))]
-            files.sort(key=lambda m: m.get("name",""), reverse=True)
-            return files
-
-        @st.cache_data(ttl=300, max_entries=10, show_spinner=False)
-        def ensure_log_cached(meta: Dict[str, Any], force: bool = False) -> Path:
-            local_path = POWER_CACHE / meta["name"]
-            return download_to(local_path, meta["id"], force=force)
-
-        def _parse_float_list(line: str) -> List[float]:
-            try:
-                payload = line.split(",", 1)[1]
-            except Exception:
-                return []
-            vals = []
-            for tok in payload.strip().split(","):
-                tok = tok.strip().rstrip(".")
-                try:
-                    vals.append(float(tok))
-                except Exception:
-                    pass
-            return vals
-
-        def parse_power_log(path: Path) -> Optional[pd.DataFrame]:
-            try:
-                text = path.read_text(encoding="utf-8", errors="ignore")
-            except Exception:
-                return None
-            lines = [l.strip() for l in text.splitlines() if l.strip()]
-            if not lines: return None
-
-            try:
-                head_dt = datetime.strptime(lines[0], "%Y-%m-%d %H:%M:%S")
-            except Exception:
-                head_dt = None
-                for l in lines[:3]:
-                    m = re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", l)
-                    if m:
-                        try:
-                            head_dt = datetime.strptime(m.group(0), "%Y-%m-%d %H:%M:%S")
-                            break
-                        except Exception:
-                            pass
-            if head_dt is None:
-                return None
-
-            wh_line   = next((l for l in lines if l.upper().startswith("PH_WH")),   "")
-            mah_line  = next((l for l in lines if l.upper().startswith("PH_MAH")),  "")
-            soci_line = next((l for l in lines if l.upper().startswith("PH_SOCI")), "")
-            socv_line = next((l for l in lines if l.upper().startswith("PH_SOCV")), "")
-
-            WH   = _parse_float_list(wh_line)
-            mAh  = _parse_float_list(mah_line)
-            SoCi = _parse_float_list(soci_line)
-            SoCv = _parse_float_list(socv_line)
-
-            L = max(len(WH), len(mAh), len(SoCi), len(SoCv))
-            if L == 0: return None
-
-            def _pad_left(arr: List[float], n: int) -> List[float]:
-                return [np.nan]*(n-len(arr)) + arr if len(arr) < n else arr[:n]
-
-            WH   = _pad_left(WH,   L)
-            mAh  = _pad_left(mAh,  L)
-            SoCi = _pad_left(SoCi, L)
-            SoCv = _pad_left(SoCv, L)
-
-            times = [head_dt - timedelta(hours=(L-1 - i)) for i in range(L)]
-            df = pd.DataFrame({"t": times, "PH_WH": WH, "PH_mAh": mAh, "PH_SoCi": SoCi, "PH_SoCv": SoCv})
-
-            eps = 1e-9
-            all_zero_mask = (
-                (np.abs(df["PH_WH"])   < eps) &
-                (np.abs(df["PH_mAh"])  < eps) &
-                (np.abs(df["PH_SoCi"]) < eps) &
-                (np.abs(df["PH_SoCv"]) < eps)
-            )
-            df = df.loc[~all_zero_mask].reset_index(drop=True)
-            return df
-
-        cache_epoch = st.session_state.get("DRIVE_EPOCH", "0")
-        if st.button("Load power data", type="primary", key=k("tab3_show_btn")):
-            # ★ REVISED: use st.status for progressive feedback
-            with st.status("Building power time-series…", expanded=True) as pwr_status:
+            st.warning("No `Power logs` folder found.")
+        else:
+            # Auto-load — no button required
+            with st.spinner("Loading power data…"):
+                cache_epoch = st.session_state.get("DRIVE_EPOCH", "0")
                 files = list_power_logs(logs_folder["id"], cache_epoch=cache_epoch)
-
-                window_days = 7
-                cutoff = datetime.now() - timedelta(days=window_days)
-
-                frames: List[pd.DataFrame] = []
+                cutoff = datetime.now() - timedelta(days=7)
+                frames = []
                 for meta in files:
                     local = ensure_log_cached(meta, force=False)
                     df = parse_power_log(local)
-                    if df is None or df.empty:
-                        continue
+                    if df is None or df.empty: continue
                     df = df[df["t"] >= cutoff]
-                    if df.empty:
-                        break
+                    if df.empty: break
                     frames.append(df)
-
-                ts = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(
-                    columns=["t","PH_WH","PH_mAh","PH_SoCi","PH_SoCv"]
-                )
-                pwr_status.update(label=f"Loaded {len(ts):,} data points", state="complete")
+                ts = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=["t","PH_WH","PH_mAh","PH_SoCi","PH_SoCv"])
 
             if ts.empty:
-                st.warning("No parsable power logs in the last 7 days.")
+                st.info("No parsable power logs in the last 7 days.")
             else:
                 ts = ts.drop_duplicates(subset=["t"]).sort_values("t").reset_index(drop=True)
 
-                # ★ FIX: Plotly 6.x — build chart with no string titles in dicts
                 fig = go.Figure()
                 fig.add_trace(go.Scatter(x=ts["t"], y=ts["PH_SoCi"], mode="lines",
-                                         name="SoC (%)", line=dict(color="#22c55e", width=2.5)))
-                fig.add_trace(go.Scatter(x=ts["t"], y=ts["PH_WH"],  mode="lines",
-                                         name="Energy (Wh)", line=dict(color="#f59e0b", width=2), yaxis="y2"))
+                                         name="SoC (%)", line=dict(color="#4CAF50", width=2.5)))
+                fig.add_trace(go.Scatter(x=ts["t"], y=ts["PH_WH"], mode="lines",
+                                         name="Energy (Wh)", line=dict(color="#FF9800", width=2), yaxis="y2"))
                 fig.update_layout(
                     yaxis2=dict(overlaying="y", side="right"),
                     legend=dict(orientation="h", y=-0.12),
-                    margin=dict(l=10, r=10, t=50, b=10),
+                    margin=dict(l=10,r=10,t=10,b=10),
                     hovermode="x unified",
                 )
                 fig.update_layout(title_text="Battery & Energy — last 7 days")
-                fig.update_yaxes(title_text="SoC (%)", range=[0, 105], selector=dict(side="left"))
+                fig.update_yaxes(title_text="SoC (%)", range=[0,105], selector=dict(side="left"))
                 fig.update_yaxes(title_text="Wh", selector=dict(side="right"))
                 st.plotly_chart(fig, use_container_width=True)
 
-                stitched_days = max(1, (ts["t"].max() - ts["t"].min()).days + 1)
-                st.caption(f"Range: {ts['t'].min().strftime('%Y-%m-%d %H:%M')} → {ts['t'].max().strftime('%Y-%m-%d %H:%M')} · {len(ts)} points")
-
-                # ★ REVISED: metric cards instead of st.metric
                 last = ts.iloc[-1]
                 st.markdown(f"""
                 <div class="kn-metrics">
@@ -1974,361 +1686,234 @@ with tab3:
                     <div class="kn-metric"><div class="kn-metric-val">{len(ts):,}</div><div class="kn-metric-label">Data points</div></div>
                 </div>
                 """, unsafe_allow_html=True)
+                st.caption(f"Range: {ts['t'].min().strftime('%Y-%m-%d %H:%M')} → {ts['t'].max().strftime('%Y-%m-%d %H:%M')}")
 
-    _render_power_tab()
 
-# ================================
-# TAB 4 — GUI autostart log tail
-# ================================
-with tab4:
-    def _render_log_tab():  # ★ FIX: function wrapper
-        st.markdown("#### GUI autostart log")
-        st.markdown('<p class="kn-muted">Tail of the latest autostart log from the node. Newest lines first.</p>', unsafe_allow_html=True)
+# ============================================================================
+# PAGE: Log (structured viewer)
+# ============================================================================
+elif page == "📋 Log":
+    st.markdown("#### GUI autostart log")
+    st.caption("Latest autostart log from the node, parsed into a structured view.")
 
-        if not drive_enabled():
-            st.error("Google Drive is not configured in secrets.")
-            return  # ★ was st.stop()
-
-        # Locate: From the node / Power logs / raw
+    if not drive_enabled():
+        st.error("Google Drive is not configured.")
+    else:
         power_folder = find_subfolder_by_name(GDRIVE_FOLDER_ID, "Power logs")
-        if not power_folder:
-            st.warning("Could not find 'Power logs' under the Drive root.")
-            return  # ★ was st.stop()
+        raw_folder = find_subfolder_by_name(power_folder["id"], "raw") if power_folder else None
 
-        raw_folder = find_subfolder_by_name(power_folder["id"], "raw")
         if not raw_folder:
-            st.warning("Could not find 'raw' inside 'Power logs'.")
-            return  # ★ was st.stop()
+            st.warning("Could not locate `Power logs/raw` in Drive.")
+        else:
+            cache_epoch = st.session_state.get("DRIVE_EPOCH", "0")
+            files = list_autostart_logs(raw_folder["id"], cache_epoch=cache_epoch)
 
-        cache_epoch = st.session_state.get("DRIVE_EPOCH", "0")
-        files = list_autostart_logs(raw_folder["id"], cache_epoch=cache_epoch)
-
-        colA, colB = st.columns([1, 3])
-        with colA:
-            do_refresh = st.button("↻ Refresh", key=k("tab4_refresh"))
-        if do_refresh:
-            st.cache_data.clear()
-            try:
-                for p in POWER_CACHE.glob("*__gui_autostart.log"):
-                    p.unlink(missing_ok=True)
-            except Exception as e:
-                if type(e).__name__ in ("RerunException", "StopException", "RerunData"):
-                    raise
-                st.warning(f"Could not clear cached GUI logs: {e!s}")
-            st.rerun()
-
-        if not files:
-            st.info("No files matching `*__gui_autostart.log` were found in Power logs/raw.")
-            return  # ★ was st.stop()
-
-        latest = files[0]  # newest first
-
-        local = ensure_raw_cached(latest, force=True)
-
-        try:
-            size_bytes = local.stat().st_size
-            st.caption(
-                f"File: `{latest.get('name','(unknown)')}` — {size_bytes:,} bytes"
-            )
-        except Exception as e:
-            st.warning(f"Local cache path issue: {e!s}")
-
-        # Tail last 500 lines efficiently
-        def tail_lines(path: Path, max_lines: int = 500, block_size: int = 8192) -> List[str]:
-            try:
-                if not path.exists():
-                    return [f"[tail error] file does not exist: {path}"]
-                if path.stat().st_size == 0:
-                    return ["[tail notice] log file is empty (0 bytes)."]
-
-                with open(path, "rb") as f:
-                    f.seek(0, os.SEEK_END)
-                    end = f.tell()
-                    lines: List[bytes] = []
-                    buf = b""
-                    while end > 0 and len(lines) <= max_lines:
-                        read_size = min(block_size, end)
-                        end -= read_size
-                        f.seek(end, os.SEEK_SET)
-                        chunk = f.read(read_size)
-                        buf = chunk + buf
-                        parts = buf.split(b"\n")
-                        buf = parts[0]
-                        lines_chunk = parts[1:]
-                        lines = lines_chunk + lines
-                    text_lines = b"\n".join(lines).decode("utf-8", errors="replace").splitlines()
-                    return text_lines[-max_lines:]
-            except Exception as e:
-                return [f"[tail error] {e!s}"]
-
-        lines = tail_lines(local, max_lines=500)
-        lines = list(reversed(lines))
-        numbered = "\n".join(f"{i+1:>4}  {line}" for i, line in enumerate(lines))
-
-        fn = latest.get("name", "(unknown)")
-
-        try:
-            with open(local, "rb") as _fh:
-                st.download_button(
-                    "Download full log",
-                    _fh,
-                    file_name=fn,
-                    mime="text/plain",
-                    key=k("dl_gui_log"),
-                )
-        except Exception as e:
-            if type(e).__name__ in ("RerunException", "StopException", "RerunData"):
-                raise
-            st.warning(f"Could not open cached log for download: {e!s}")
-
-        st.code(numbered, language="log")
-    _render_log_tab()
-
-
-# ==================================
-# TAB 6 — Species Search & Trends
-# ==================================
-with tab_search:
-    def _render_search_tab():
-        st.markdown("#### Species search & trends")
-        st.markdown('<p class="kn-muted">Search for one or more species across a date range. See daily detection counts and peak activity hours.</p>', unsafe_allow_html=True)
-
-        # ── Load CSV index (cached — effectively free after first Detections tab visit) ──
-        cache_epoch = st.session_state.get("DRIVE_EPOCH", "0")
-        if drive_enabled():
-            bn_meta, kn_meta = list_csvs_drive_root(GDRIVE_FOLDER_ID, cache_epoch=cache_epoch, nocache="stable")
-            if bn_meta or kn_meta:
-                bn_paths = [str(ensure_csv_cached(m, subdir="root/bn", cache_epoch=cache_epoch, force=False)) for m in bn_meta]
-                kn_paths = [str(ensure_csv_cached(m, subdir="root/kn", cache_epoch=cache_epoch, force=False)) for m in kn_meta]
+            if not files:
+                st.info("No `*__gui_autostart.log` files found.")
             else:
-                bn_paths, kn_paths = [], []
-        else:
-            bn_local, kn_local = list_csvs_local(ROOT_LOCAL)
-            bn_paths, kn_paths = list(bn_local), list(kn_local)
+                latest = files[0]
+                local = ensure_raw_cached(latest, force=True)
+                st.caption(f"File: `{latest.get('name', '?')}` — {local.stat().st_size:,} bytes")
 
-        bn_by_date = build_date_index(bn_paths, "bn") if bn_paths else {}
-        kn_by_date = build_date_index(kn_paths, "kn") if kn_paths else {}
-        all_dates = sorted(set(bn_by_date.keys()) | set(kn_by_date.keys()))
-
-        if not all_dates:
-            st.warning("No detection data available. Check your Drive connection or local data path.")
-            return
-
-        # ── Build a quick species list from the latest date (for autocomplete hint) ──
-        @st.cache_data(ttl=600, max_entries=5, show_spinner=False)
-        def _get_species_list(_paths_bn, _paths_kn, _latest_date):
-            """Get unique species from latest date for the hint text."""
-            species = set()
-            for kind, idx in [("bn", bn_by_date), ("kn", kn_by_date)]:
-                for p in idx.get(_latest_date, []):
-                    try:
-                        raw = load_csv(p)
-                        std = standardize_root_df(raw, kind)
-                        species.update(std["Label"].dropna().unique())
-                    except Exception:
-                        pass
-            return sorted(species)
-
-        known_species = _get_species_list(tuple(bn_paths), tuple(kn_paths), all_dates[-1])
-
-        # ── Input form ──
-        with st.form(key=k("search_form")):
-            st.markdown("**Enter species names** (comma-separated)")
-            species_input = st.text_input(
-                "Species",
-                placeholder="e.g. Tui, Morepork, Silvereye",
-                key=k("search_species"),
-                label_visibility="collapsed",
-            )
-            if known_species:
-                st.caption(f"Available species include: {', '.join(known_species[:15])}{'…' if len(known_species) > 15 else ''}")
-
-            sc1, sc2, sc3, sc4 = st.columns([2, 2, 1, 1])
-            with sc1:
-                default_start = max(all_dates[0], all_dates[-1] - timedelta(days=30))
-                d_start = st.date_input("Start date", value=default_start,
-                                         min_value=all_dates[0], max_value=all_dates[-1],
-                                         key=k("search_start"))
-            with sc2:
-                d_end = st.date_input("End date", value=all_dates[-1],
-                                       min_value=all_dates[0], max_value=all_dates[-1],
-                                       key=k("search_end"))
-            with sc3:
-                search_conf = st.slider("Min confidence", 0.0, 1.0, 0.80, 0.01, key=k("search_conf"))
-            with sc4:
-                search_src = st.selectbox("Source", ["Combined", "KōreroNET", "BirdNET"], key=k("search_src"))
-
-            submitted = st.form_submit_button("Search", type="primary", use_container_width=True)
-
-        if not submitted:
-            st.info("Enter species names and click **Search** to see trends.")
-            return
-
-        # ── Parse species input ──
-        target_species = [s.strip() for s in species_input.split(",") if s.strip()]
-        if not target_species:
-            st.warning("Please enter at least one species name.")
-            return
-
-        # ── Determine which date indices to use ──
-        if search_src == "BirdNET":
-            date_indices = [("bn", bn_by_date)]
-        elif search_src == "KōreroNET":
-            date_indices = [("kn", kn_by_date)]
-        else:
-            date_indices = [("bn", bn_by_date), ("kn", kn_by_date)]
-
-        # ── Collect all relevant dates in range ──
-        dates_in_range = [d for d in all_dates if d_start <= d <= d_end]
-        if not dates_in_range:
-            st.warning(f"No data available between {d_start} and {d_end}.")
-            return
-
-        # ── Load & filter: only CSVs that overlap the date range ──
-        with st.status(f"Searching {len(dates_in_range)} dates for {len(target_species)} species…", expanded=True) as search_status:
-            # Collect unique CSV paths to avoid loading the same file twice
-            paths_to_load: Dict[str, str] = {}  # path → kind
-            for kind, idx in date_indices:
-                for d in dates_in_range:
-                    for p in idx.get(d, []):
-                        if p not in paths_to_load:
-                            paths_to_load[p] = kind
-
-            # Load all relevant CSVs (cached) and filter
-            frames = []
-            for p, kind in paths_to_load.items():
+                # Read and parse log
                 try:
-                    raw = load_csv(p)
-                    std = standardize_root_df(raw, kind)
-                    # Filter by date range
-                    std = std[(std["ActualTime"].dt.date >= d_start) & (std["ActualTime"].dt.date <= d_end)]
-                    # Filter by confidence
-                    std = std[pd.to_numeric(std["Confidence"], errors="coerce") >= search_conf]
-                    if not std.empty:
-                        frames.append(std)
-                except Exception:
-                    pass
+                    raw_text = local.read_text(encoding="utf-8", errors="replace")
+                    raw_lines = raw_text.splitlines()[-500:]  # tail 500
 
-            if not frames:
-                search_status.update(label="No detections found.", state="error")
-                return
+                    # Try to parse structured log entries
+                    log_rows = []
+                    ts_re = re.compile(r"^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\s*[-|]\s*(\w+)\s*[-|:]\s*(.*)")
+                    for line in raw_lines:
+                        m = ts_re.match(line.strip())
+                        if m:
+                            log_rows.append({"Timestamp": m.group(1), "Level": m.group(2), "Message": m.group(3)})
+                        elif line.strip():
+                            log_rows.append({"Timestamp": "", "Level": "—", "Message": line.strip()})
 
-            df_all = pd.concat(frames, ignore_index=True)
+                    if log_rows:
+                        log_df = pd.DataFrame(log_rows)
 
-            # Case-insensitive fuzzy match: find species whose name contains the search term
-            matched_species = set()
-            for target in target_species:
-                target_lower = target.lower()
-                matches = df_all[df_all["Label"].str.lower().str.contains(target_lower, na=False)]["Label"].unique()
-                matched_species.update(matches)
+                        # Filter controls
+                        fc1, fc2 = st.columns([1, 3])
+                        with fc1:
+                            levels = sorted(log_df["Level"].unique())
+                            sel_levels = st.multiselect("Severity", levels, default=levels, key=k("log_levels"))
+                        with fc2:
+                            search_text = st.text_input("Search", placeholder="Filter messages…", key=k("log_search"))
 
-            if not matched_species:
-                search_status.update(label=f"No matches found for: {', '.join(target_species)}", state="error")
-                st.info(f"No species matching **{', '.join(target_species)}** found in the data. "
-                        f"Try partial names (e.g. 'Tui' instead of 'North Island Tui').")
-                return
+                        filtered = log_df[log_df["Level"].isin(sel_levels)]
+                        if search_text:
+                            filtered = filtered[filtered["Message"].str.contains(search_text, case=False, na=False)]
 
-            # Filter to matched species only
-            df = df_all[df_all["Label"].isin(matched_species)].copy()
-            df["Date"] = df["ActualTime"].dt.date
-            df["Hour"] = df["ActualTime"].dt.hour
+                        st.dataframe(filtered.iloc[::-1], use_container_width=True, hide_index=True, height=500)
+                    else:
+                        # Fallback: raw code view
+                        st.code("\n".join(reversed(raw_lines)), language="log")
 
-            search_status.update(
-                label=f"Found {len(df):,} detections across {len(matched_species)} species",
-                state="complete",
-            )
+                except Exception as e:
+                    st.warning(f"Could not parse log: {e!s}")
+                    st.code("(raw log unavailable)", language="log")
 
-        # ── Summary metrics ──
-        st.markdown(f"""
-        <div class="kn-metrics">
-            <div class="kn-metric"><div class="kn-metric-val">{len(df):,}</div><div class="kn-metric-label">Total detections</div></div>
-            <div class="kn-metric"><div class="kn-metric-val">{len(matched_species)}</div><div class="kn-metric-label">Species matched</div></div>
-            <div class="kn-metric"><div class="kn-metric-val">{df['Date'].nunique()}</div><div class="kn-metric-label">Days with data</div></div>
-            <div class="kn-metric"><div class="kn-metric-val">{search_conf:.0%}</div><div class="kn-metric-label">Confidence ≥</div></div>
-        </div>
-        """, unsafe_allow_html=True)
+                st.download_button("Download full log", local.read_bytes(),
+                                    file_name=latest.get("name", "log.txt"), mime="text/plain", key=k("dl_log"))
 
-        # ── Chart 1: Daily detection trend (line chart, one line per species) ──
-        st.markdown("##### Daily detections")
-        daily = df.groupby(["Date", "Label"]).size().reset_index(name="Detections")
-        daily["Date"] = pd.to_datetime(daily["Date"])
 
-        # Fill missing dates with 0 so lines don't jump across gaps
-        full_dates = pd.date_range(d_start, d_end, freq="D")
-        filled_frames = []
-        for sp in sorted(matched_species):
-            sp_data = daily[daily["Label"] == sp].set_index("Date").reindex(full_dates, fill_value=0)
-            sp_data["Label"] = sp
-            sp_data.index.name = "Date"
-            filled_frames.append(sp_data.reset_index())
-        daily_filled = pd.concat(filled_frames, ignore_index=True)
+# ============================================================================
+# PAGE: Search (species trends)
+# ============================================================================
+elif page == "🔍 Search":
+    st.markdown("#### Species search & trends")
+    st.caption("Search for species across a date range. See daily detection counts and peak activity hours.")
 
-        fig_daily = px.line(
-            daily_filled, x="Date", y="Detections", color="Label",
-            markers=True if len(dates_in_range) <= 60 else False,
-            labels={"Detections": "Detections", "Date": "", "Label": "Species"},
-        )
-        fig_daily.update_layout(
-            legend=dict(orientation="h", y=-0.15),
-            margin=dict(l=10, r=10, t=10, b=10),
-            hovermode="x unified",
-        )
-        fig_daily.update_traces(line=dict(width=2.5))
-        st.plotly_chart(fig_daily, use_container_width=True)
+    epoch = st.session_state.get("DRIVE_EPOCH", "0")
+    bn_paths, kn_paths, bn_by_date, kn_by_date = _load_csv_index(epoch)
+    all_dates = sorted(set(bn_by_date.keys()) | set(kn_by_date.keys()))
 
-        # ── Chart 2: Hour-of-day activity (heatmap: species × hour) ──
-        st.markdown("##### Peak activity by hour of day")
-        hourly = df.groupby(["Label", "Hour"]).size().reset_index(name="Count")
-        hour_labels = {h: f"{(h % 12) or 12} {'AM' if h < 12 else 'PM'}" for h in range(24)}
-        order = [hour_labels[h] for h in range(24)]
+    if not all_dates:
+        st.warning("No detection data available.")
+    else:
+        # Species hint from latest date
+        @st.cache_data(ttl=600, max_entries=5, show_spinner=False)
+        def _species_hint(_bn, _kn, _d):
+            sp = set()
+            for kind, idx in [("bn", bn_by_date), ("kn", kn_by_date)]:
+                for p in idx.get(_d, []):
+                    try:
+                        std = standardize_root_df(load_csv(p), kind)
+                        sp.update(std["Label"].dropna().unique())
+                    except Exception: pass
+            return sorted(sp)
 
-        pivot = hourly.pivot_table(index="Label", columns="Hour", values="Count", fill_value=0).astype(int)
-        # Ensure all 24 hours present
-        for h in range(24):
-            if h not in pivot.columns:
-                pivot[h] = 0
-        pivot = pivot[sorted(pivot.columns)]
-        pivot.columns = [hour_labels[h] for h in pivot.columns]
+        known = _species_hint(tuple(bn_paths), tuple(kn_paths), all_dates[-1])
 
-        # Sort species by total detections (most active at top)
-        totals = pivot.sum(axis=1)
-        pivot = pivot.loc[totals.sort_values(ascending=False).index]
+        st.markdown("**Enter species names** (comma-separated)")
+        species_input = st.text_input("Species", placeholder="e.g. Tui, Morepork, Silvereye",
+                                       key=k("s_sp"), label_visibility="collapsed")
+        if known:
+            st.caption(f"Available: {', '.join(known[:15])}{'…' if len(known)>15 else ''}")
 
-        fig_hourly = px.imshow(
-            pivot.values, x=pivot.columns, y=pivot.index,
-            color_continuous_scale="YlOrRd",
-            labels=dict(x="Hour", y="Species", color="Detections"),
-            text_auto=True, aspect="auto",
-        )
-        fig_hourly.update_layout(
-            margin=dict(l=10, r=10, t=10, b=10),
-            coloraxis_colorbar=dict(thickness=14, len=0.6),
-        )
-        fig_hourly.update_xaxes(type="category")
-        st.plotly_chart(fig_hourly, use_container_width=True)
+        sc1, sc2, sc3, sc4 = st.columns([2, 2, 1, 1])
+        with sc1:
+            default_start = max(all_dates[0], all_dates[-1] - timedelta(days=30))
+            d_start = st.date_input("Start", value=default_start, min_value=all_dates[0], max_value=all_dates[-1], key=k("s_s"))
+        with sc2:
+            d_end = st.date_input("End", value=all_dates[-1], min_value=all_dates[0], max_value=all_dates[-1], key=k("s_e"))
+        with sc3:
+            search_conf = st.slider("Confidence", 0.0, 1.0, 0.80, 0.01, key=k("s_c"))
+        with sc4:
+            search_src = st.selectbox("Source", ["Combined", "KōreroNET", "BirdNET"], key=k("s_src"))
 
-        # ── Per-species peak hour summary ──
-        st.markdown("##### Peak hour per species")
-        peak_data = []
-        for sp in sorted(matched_species):
-            sp_hourly = df[df["Label"] == sp].groupby("Hour").size()
-            if sp_hourly.empty:
-                continue
-            peak_hour = sp_hourly.idxmax()
-            peak_count = sp_hourly.max()
-            total = sp_hourly.sum()
-            days_active = df[df["Label"] == sp]["Date"].nunique()
-            avg_per_day = total / max(days_active, 1)
-            peak_data.append({
-                "Species": sp,
-                "Peak hour": hour_labels[peak_hour],
-                "Detections at peak": int(peak_count),
-                "Total detections": int(total),
-                "Days active": days_active,
-                "Avg / day": f"{avg_per_day:.1f}",
-            })
+        if st.button("Search", type="primary", use_container_width=True, key=k("s_go")):
+            target_species = [s.strip() for s in species_input.split(",") if s.strip()]
+            if not target_species:
+                st.warning("Please enter at least one species name.")
+            else:
+                if search_src == "BirdNET":
+                    date_indices = [("bn", bn_by_date)]
+                elif search_src == "KōreroNET":
+                    date_indices = [("kn", kn_by_date)]
+                else:
+                    date_indices = [("bn", bn_by_date), ("kn", kn_by_date)]
 
-        if peak_data:
-            st.dataframe(pd.DataFrame(peak_data), use_container_width=True, hide_index=True)
+                dates_in_range = [d for d in all_dates if d_start <= d <= d_end]
+                if not dates_in_range:
+                    st.warning(f"No data between {d_start} and {d_end}.")
+                else:
+                    with st.spinner(f"Searching {len(dates_in_range)} dates…"):
+                        paths_to_load = {}
+                        for kind, idx in date_indices:
+                            for d in dates_in_range:
+                                for p in idx.get(d, []):
+                                    if p not in paths_to_load: paths_to_load[p] = kind
 
-    _render_search_tab()
+                        frames = []
+                        for p, kind in paths_to_load.items():
+                            try:
+                                raw = load_csv(p)
+                                std = standardize_root_df(raw, kind)
+                                std = std[(std["ActualTime"].dt.date >= d_start) & (std["ActualTime"].dt.date <= d_end)]
+                                std = std[pd.to_numeric(std["Confidence"], errors="coerce") >= search_conf]
+                                if not std.empty: frames.append(std)
+                            except Exception: pass
+
+                        if not frames:
+                            st.info("No detections found.")
+                        else:
+                            df_all = pd.concat(frames, ignore_index=True)
+                            matched = set()
+                            for t in target_species:
+                                matches = df_all[df_all["Label"].str.lower().str.contains(t.lower(), na=False)]["Label"].unique()
+                                matched.update(matches)
+
+                            if not matched:
+                                st.info(f"No species matching **{', '.join(target_species)}**. Try partial names.")
+                            else:
+                                df = df_all[df_all["Label"].isin(matched)].copy()
+                                df["Date"] = df["ActualTime"].dt.date
+                                df["Hour"] = df["ActualTime"].dt.hour
+
+                                st.markdown(f"""
+                                <div class="kn-metrics">
+                                    <div class="kn-metric"><div class="kn-metric-val">{len(df):,}</div><div class="kn-metric-label">Total detections</div></div>
+                                    <div class="kn-metric"><div class="kn-metric-val">{len(matched)}</div><div class="kn-metric-label">Species matched</div></div>
+                                    <div class="kn-metric"><div class="kn-metric-val">{df['Date'].nunique()}</div><div class="kn-metric-label">Days with data</div></div>
+                                </div>
+                                """, unsafe_allow_html=True)
+
+                                # Daily trend
+                                st.markdown("##### Daily detections")
+                                daily = df.groupby(["Date","Label"]).size().reset_index(name="Detections")
+                                daily["Date"] = pd.to_datetime(daily["Date"])
+                                full_dates = pd.date_range(d_start, d_end, freq="D")
+                                filled = []
+                                for sp in sorted(matched):
+                                    sp_d = daily[daily["Label"]==sp].set_index("Date").reindex(full_dates, fill_value=0)
+                                    sp_d["Label"] = sp
+                                    sp_d.index.name = "Date"
+                                    filled.append(sp_d.reset_index())
+                                daily_f = pd.concat(filled, ignore_index=True)
+
+                                fig = px.line(daily_f, x="Date", y="Detections", color="Label",
+                                              markers=len(dates_in_range) <= 60)
+                                fig.update_layout(legend=dict(orientation="h", y=-0.15),
+                                                  margin=dict(l=10,r=10,t=10,b=10), hovermode="x unified")
+                                fig.update_traces(line=dict(width=2.5))
+                                st.plotly_chart(fig, use_container_width=True)
+
+                                # Hour heatmap
+                                st.markdown("##### Peak activity by hour")
+                                hourly = df.groupby(["Label","Hour"]).size().reset_index(name="Count")
+                                hour_labels = {h: f"{(h%12) or 12} {'AM' if h<12 else 'PM'}" for h in range(24)}
+                                pivot = hourly.pivot_table(index="Label", columns="Hour", values="Count", fill_value=0).astype(int)
+                                for h in range(24):
+                                    if h not in pivot.columns: pivot[h] = 0
+                                pivot = pivot[sorted(pivot.columns)]
+                                pivot.columns = [hour_labels[h] for h in pivot.columns]
+                                totals = pivot.sum(axis=1)
+                                pivot = pivot.loc[totals.sort_values(ascending=False).index]
+
+                                fig2 = px.imshow(pivot.values, x=pivot.columns, y=pivot.index,
+                                                 color_continuous_scale="YlOrRd",
+                                                 labels=dict(x="Hour", y="Species", color="Detections"),
+                                                 text_auto=True, aspect="auto")
+                                fig2.update_layout(margin=dict(l=10,r=10,t=10,b=10),
+                                                   coloraxis_colorbar=dict(thickness=14, len=0.6))
+                                fig2.update_xaxes(type="category")
+                                st.plotly_chart(fig2, use_container_width=True)
+
+                                # Peak hour table
+                                st.markdown("##### Peak hour per species")
+                                peak_data = []
+                                for sp in sorted(matched):
+                                    sp_h = df[df["Label"]==sp].groupby("Hour").size()
+                                    if sp_h.empty: continue
+                                    ph = sp_h.idxmax()
+                                    total = sp_h.sum()
+                                    days = df[df["Label"]==sp]["Date"].nunique()
+                                    peak_data.append({
+                                        "Species": sp, "Peak hour": hour_labels[ph],
+                                        "At peak": int(sp_h.max()), "Total": int(total),
+                                        "Days active": days, "Avg/day": f"{total/max(days,1):.1f}",
+                                    })
+                                if peak_data:
+                                    st.dataframe(pd.DataFrame(peak_data), use_container_width=True, hide_index=True)
