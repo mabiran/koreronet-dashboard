@@ -1352,7 +1352,7 @@ elif page == "Detections":
     with fc1:
         src = st.selectbox("Source", ["KōreroNET (kn)", "BirdNET (bn)", "Combined"], index=0, key=k("det_src"))
     with fc3:
-        min_conf = st.slider("Min confidence", 0.0, 1.0, 0.90, 0.01, key=k("det_conf"))
+        min_conf = st.slider("Min confidence", 0.0, 1.0, 0.70, 0.01, key=k("det_conf"))
 
     if src == "Combined":
         options = paired_dates
@@ -1472,7 +1472,7 @@ elif page == "Verify":
                     with fc2:
                         src_mode_v = st.selectbox("Source", ["KoreroNET (KN)", "BirdNET (BN)", "Combined"], key=k("v_src"))
                     with fc3:
-                        min_conf_v = st.slider("Min confidence", 0.0, 1.0, 0.90, 0.01, key=k("v_conf"))
+                        min_conf_v = st.slider("Min confidence", 0.0, 1.0, 0.70, 0.01, key=k("v_conf"))
 
                     if day_pick not in snap_date_map:
                         nearest = min(avail_dates, key=lambda d: abs((d - day_pick).days))
