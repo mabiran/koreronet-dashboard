@@ -28,6 +28,14 @@ folder that holds all the node folders:
 Every `From the node <N>` folder becomes a selectable node in the sidebar, and
 each one is plotted on the map from its own `.ini`.
 
+**How nodes are found (online):** the dashboard discovers a node folder if it is
+either (a) a child of the folder in `GDRIVE_FOLDER_ID`, **or** (b) any folder
+named `From the node …` that the **service account can access**. Because the
+node folders usually live at your **My Drive root** (a service account can't list
+My Drive root), the reliable way is (b): **share each `From the node <N>` folder
+with the service-account `client_email`** (Viewer). No parent folder or secret
+change is required — share a new node's folder and it appears automatically.
+
 ### The node `.ini`
 
 Drop a small `.ini` in each `From the node <N>` folder (any `*.ini`;
@@ -51,7 +59,9 @@ setup).
 ## Configuration (`.streamlit/secrets.toml`)
 
 ```toml
-GDRIVE_FOLDER_ID = "your_root_folder_id"   # the PARENT of all node folders
+GDRIVE_FOLDER_ID = "any_shared_node_folder_id"   # a parent of node folders, or
+                                                 # just one node folder — nodes are
+                                                 # also auto-discovered by name (b)
 
 [service_account]                          # Google service account (drive.readonly)
 type = "service_account"
@@ -62,8 +72,10 @@ client_email = "…@….iam.gserviceaccount.com"
 # … remaining service-account fields …
 ```
 
-Share the parent Drive folder (and its sub-folders) with the service account's
-`client_email` (Viewer is enough).
+**Share every `From the node <N>` folder with the service account's
+`client_email`** (Viewer). That is what makes each node visible and its data
+loadable. `GDRIVE_FOLDER_ID` can point at any shared node folder (or a parent);
+additional nodes are discovered by name as long as they're shared with the SA.
 
 ### Offline / local mode
 

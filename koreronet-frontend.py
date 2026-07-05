@@ -215,7 +215,7 @@ DEFAULT_ROOT = r"G:\My Drive\From the node"
 ROOT_LOCAL   = os.getenv("KORERONET_DATA_ROOT", DEFAULT_ROOT)
 
 # ---- Offline/Online switch --------------------------------------------------
-OFFLINE_DEPLOY: bool = False   # ← flip to False when you want online mode
+OFFLINE_DEPLOY: bool = os.getenv("KORERONET_OFFLINE", "0").strip().lower() in ("1", "true", "yes", "on")   # online by default; set KORERONET_OFFLINE=1 to read a LOCAL Drive clone (KORERONET_DATA_ROOT)
 
 # Your local Google Drive clone root:
 ROOT_LOCAL = os.getenv("KORERONET_DATA_ROOT", r"G:\My Drive\From the node")
@@ -1225,7 +1225,8 @@ def _read_node_ini(folder_id: str) -> Dict[str, Any]:
         return {}
     inis = [c for c in kids
             if c.get("mimeType") != "application/vnd.google-apps.folder"
-            and str(c.get("name", "")).lower().endswith(".ini")]
+            and str(c.get("name", "")).lower().endswith(".ini")
+            and str(c.get("name", "")).lower() != "desktop.ini"]  # ignore Windows system file
     if not inis:
         return {}
     # prefer node.ini / location.ini / site.ini, otherwise the first .ini found
@@ -1241,27 +1242,66 @@ def _read_node_ini(folder_id: str) -> Dict[str, Any]:
     except Exception:
         return {}
 
+@st.cache_data(ttl=300, max_entries=2, show_spinner=False)
+def _query_node_folders(cache_epoch: str = "") -> List[Dict[str, Any]]:
+    """Online only: every folder named like 'From the node …' that the service
+    account can access (owned or shared-with-it), regardless of parent. This is
+    what makes multi-node work when the node folders live at My Drive root — which
+    a service account cannot list directly. Share each node folder with the
+    service-account email and it shows up here."""
+    if OFFLINE_DEPLOY:
+        return []
+    drive = get_drive_client()
+    if not drive or drive == "offline":
+        return []
+    out: List[Dict[str, Any]] = []
+    try:
+        page_token = None
+        while True:
+            resp = drive.files().list(
+                q=("mimeType = 'application/vnd.google-apps.folder' "
+                   "and name contains 'From the node' and trashed = false"),
+                fields="nextPageToken, files(id,name)",
+                pageSize=200, pageToken=page_token,
+                includeItemsFromAllDrives=True, supportsAllDrives=True,
+            ).execute()
+            out.extend(resp.get("files", []))
+            page_token = resp.get("nextPageToken")
+            if not page_token:
+                break
+    except Exception:
+        return out
+    return out
+
+
 @st.cache_data(ttl=300, max_entries=4, show_spinner=False)
 def discover_nodes(root_id: str, cache_epoch: str = "") -> List[Dict[str, Any]]:
-    """Enumerate every 'From the node <N>' folder under root_id and read each
-    node's .ini. Returns a list of node dicts (key/num/name/lat/lon/desc/
-    folder_id). Falls back to treating root_id itself as a single node."""
-    if not root_id:
-        return []
-    try:
-        kids = list_children(root_id, max_items=2000)
-    except Exception:
-        return []
-    found = []
-    for c in kids:
-        if c.get("mimeType") != "application/vnd.google-apps.folder":
-            continue
-        m = _FROM_NODE_RE.match(str(c.get("name", "")))
-        if m:
-            found.append((m.group(1).strip(), c))
+    """Find every 'From the node <N>' folder and read each node's .ini.
+    Candidates come from BOTH (a) the children of the configured root folder and
+    (b) a Drive-wide name query for folders the service account can access — so it
+    works whether GDRIVE_FOLDER_ID points at a shared parent OR the node folders
+    are shared individually at My Drive root. Falls back to treating root_id
+    itself as a single node."""
+    candidates: Dict[str, Dict[str, Any]] = {}   # folder_id -> {id, name}
+    # (a) children of the configured root folder
+    if root_id:
+        try:
+            for c in list_children(root_id, max_items=2000):
+                if (c.get("mimeType") == "application/vnd.google-apps.folder"
+                        and _FROM_NODE_RE.match(str(c.get("name", "")))):
+                    candidates[c["id"]] = {"id": c["id"], "name": c["name"]}
+        except Exception:
+            pass
+    # (b) every accessible "From the node *" folder (online query; [] offline)
+    for f in _query_node_folders(cache_epoch):
+        if _FROM_NODE_RE.match(str(f.get("name", ""))):
+            candidates.setdefault(f["id"], {"id": f["id"], "name": f["name"]})
+
     nodes: List[Dict[str, Any]] = []
-    if found:
-        for suffix, folder in found:
+    if candidates:
+        for folder in candidates.values():
+            m = _FROM_NODE_RE.match(folder["name"])
+            suffix = m.group(1).strip() if m else ""
             info = _read_node_ini(folder["id"])
             label = info.get("name") or (f"Node {suffix}" if suffix else folder["name"])
             nodes.append({
@@ -1277,8 +1317,8 @@ def discover_nodes(root_id: str, cache_epoch: str = "") -> List[Dict[str, Any]]:
             digits = re.sub(r"\D", "", n.get("num") or "")
             return (0, int(digits)) if digits else (1, str(n["key"]).lower())
         nodes.sort(key=_order)
-    else:
-        # No numbered sub-folders: the configured folder itself is one node.
+    elif root_id:
+        # Nothing discovered: treat the configured folder itself as one node.
         info = _read_node_ini(root_id)
         nodes.append({
             "key": info.get("name") or "Node",
