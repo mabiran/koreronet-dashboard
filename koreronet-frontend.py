@@ -233,6 +233,19 @@ def _secret_or_env(name: str, default=None):
 # If offline, map "Drive root id" to local clone path; otherwise read from env/secrets.
 GDRIVE_FOLDER_ID = ROOT_LOCAL if OFFLINE_DEPLOY else _secret_or_env("GDRIVE_FOLDER_ID", None)
 
+# ── Multi-node ───────────────────────────────────────────────────────────────
+# The configured folder is the PARENT ("root") that contains every
+# "From the node <N>" folder. GDRIVE_ROOT_ID always holds that parent;
+# GDRIVE_FOLDER_ID is re-pointed at the SELECTED node's folder in the sidebar,
+# so all the existing per-node reads keep working unchanged.
+GDRIVE_ROOT_ID = GDRIVE_FOLDER_ID
+
+def _node_tag() -> str:
+    """Filesystem-safe token for the ACTIVE node's Drive folder. Used to
+    namespace the local download cache so nodes never read each other's files."""
+    fid = str(GDRIVE_FOLDER_ID or "root")
+    return re.sub(r"[^A-Za-z0-9_-]", "_", fid)[-40:] or "root"
+
 
 # ============================================================================
 # Secrets / Drive
@@ -351,9 +364,12 @@ def _ensure_epoch_key():
             raise
         st.sidebar.warning("Drive indexing hiccup (using last known state).")
         return
-    old_epoch = st.session_state.get("DRIVE_EPOCH")
-    if old_epoch is None:
+    old_epoch  = st.session_state.get("DRIVE_EPOCH")
+    old_folder = st.session_state.get("DRIVE_EPOCH_FOLDER")
+    if old_epoch is None or old_folder != GDRIVE_FOLDER_ID:
+        # first run, or the active node changed -> adopt this folder's epoch
         st.session_state["DRIVE_EPOCH"] = new_epoch
+        st.session_state["DRIVE_EPOCH_FOLDER"] = GDRIVE_FOLDER_ID
     elif new_epoch != old_epoch:
         st.cache_data.clear()
         st.session_state["DRIVE_EPOCH"] = new_epoch
@@ -370,11 +386,11 @@ def _folder_children_cached(folder_id: str) -> List[Dict[str, Any]]:
 
 
 def ensure_csv_cached(meta: Dict[str, Any], subdir: str, cache_epoch: str = "", force: bool = False) -> Path:
-    local_path = (CSV_CACHE / subdir / meta["name"])
+    local_path = (CSV_CACHE / _node_tag() / subdir / meta["name"])
     return download_to(local_path, meta["id"], force=force)
 
 def ensure_chunk_cached(chunk_name: str, folder_id: str, subdir: str, force: bool = False) -> Optional[Path]:
-    local_path = CHUNK_CACHE / subdir / chunk_name
+    local_path = CHUNK_CACHE / _node_tag() / subdir / chunk_name
     if (not force) and local_path.exists() and local_path.stat().st_size > 0:  # ★ non-zero check
         return local_path
 
@@ -822,7 +838,7 @@ if OFFLINE_DEPLOY:
         return st.session_state[key]
 
     def ensure_chunk_cached(chunk_name: str, folder_id: str, subdir: str, force: bool = False):
-        local_path = CHUNK_CACHE / subdir / chunk_name
+        local_path = CHUNK_CACHE / _node_tag() / subdir / chunk_name
         if (not force) and local_path.exists():
             return local_path
         folder = Path(folder_id)
@@ -1037,7 +1053,7 @@ def list_autostart_logs(raw_folder_id: str, cache_epoch: str, nocache: str = "st
 @st.cache_data(ttl=300, max_entries=10, show_spinner=False)
 def ensure_raw_cached(meta: Dict[str, Any], force: bool = False) -> Path:
     """Download a raw log file to the POWER_CACHE folder."""
-    local_path = POWER_CACHE / meta["name"]
+    local_path = POWER_CACHE / _node_tag() / meta["name"]
     return download_to(local_path, meta["id"], force=force)
 
 # ★ FIX: moved to module level so both Power and Log tabs can access it
@@ -1065,7 +1081,7 @@ def list_power_logs(folder_id: str, cache_epoch: str, nocache: str = "stable") -
 
 @st.cache_data(ttl=300, max_entries=10, show_spinner=False)
 def ensure_log_cached(meta: Dict[str, Any], force: bool = False) -> Path:
-    local_path = POWER_CACHE / meta["name"]
+    local_path = POWER_CACHE / _node_tag() / meta["name"]
     return download_to(local_path, meta["id"], force=force)
 
 def _parse_float_list(line: str) -> List[float]:
@@ -1161,6 +1177,122 @@ def _humanize_chunk(chunk_name: str) -> Dict[str, str]:
 
 
 # ============================================================================
+# Multi-node discovery
+# Each "From the node <N>" folder under the Drive root carries a small .ini
+# describing its site, e.g.:
+#     name: Auckland — Sunnyhills
+#     lat:  -36.9003
+#     long: 174.8839
+# (':' or '=' accepted; keys are case-insensitive; lon/long/longitude all work.)
+# We enumerate every such folder and build the node list, so the dashboard
+# supports ANY number of nodes — one per "From the node" folder. If the root has
+# no numbered sub-folders, it is treated as a single node (backward compatible).
+# ============================================================================
+_FROM_NODE_RE = re.compile(r"^\s*from\s*the\s*node\b\s*(.*)$", re.IGNORECASE)
+
+def _node_float(s):
+    try:
+        return float(str(s).strip())
+    except Exception:
+        return None
+
+def _parse_node_ini(text: str) -> Dict[str, Any]:
+    """Parse a node .ini into {name, lat, lon}."""
+    out: Dict[str, Any] = {}
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line or line[0] in "#;[":
+            continue
+        sep = ":" if ":" in line else ("=" if "=" in line else None)
+        if not sep:
+            continue
+        key, val = line.split(sep, 1)
+        key = key.strip().lower().replace(" ", "")
+        val = val.strip()
+        if key in ("name", "node", "nodename", "site", "sitename"):
+            out["name"] = val
+        elif key in ("lat", "latitude"):
+            out["lat"] = _node_float(val)
+        elif key in ("lon", "long", "lng", "longitude"):
+            out["lon"] = _node_float(val)
+    return out
+
+def _read_node_ini(folder_id: str) -> Dict[str, Any]:
+    """Find the first *.ini inside a node folder and parse name/lat/long."""
+    try:
+        kids = list_children(folder_id, max_items=2000)
+    except Exception:
+        return {}
+    inis = [c for c in kids
+            if c.get("mimeType") != "application/vnd.google-apps.folder"
+            and str(c.get("name", "")).lower().endswith(".ini")]
+    if not inis:
+        return {}
+    # prefer node.ini / location.ini / site.ini, otherwise the first .ini found
+    def _pref(c):
+        n = str(c.get("name", "")).lower()
+        return (0 if n in ("node.ini", "location.ini", "site.ini") else 1, n)
+    inis.sort(key=_pref)
+    meta = inis[0]
+    try:
+        safe = re.sub(r"[^A-Za-z0-9._-]", "_", f"{folder_id}_{meta['name']}")
+        local = download_to(CACHE_ROOT / "node_ini" / safe, meta["id"], force=False)
+        return _parse_node_ini(Path(local).read_text(encoding="utf-8", errors="ignore"))
+    except Exception:
+        return {}
+
+@st.cache_data(ttl=300, max_entries=4, show_spinner=False)
+def discover_nodes(root_id: str, cache_epoch: str = "") -> List[Dict[str, Any]]:
+    """Enumerate every 'From the node <N>' folder under root_id and read each
+    node's .ini. Returns a list of node dicts (key/num/name/lat/lon/desc/
+    folder_id). Falls back to treating root_id itself as a single node."""
+    if not root_id:
+        return []
+    try:
+        kids = list_children(root_id, max_items=2000)
+    except Exception:
+        return []
+    found = []
+    for c in kids:
+        if c.get("mimeType") != "application/vnd.google-apps.folder":
+            continue
+        m = _FROM_NODE_RE.match(str(c.get("name", "")))
+        if m:
+            found.append((m.group(1).strip(), c))
+    nodes: List[Dict[str, Any]] = []
+    if found:
+        for suffix, folder in found:
+            info = _read_node_ini(folder["id"])
+            label = info.get("name") or (f"Node {suffix}" if suffix else folder["name"])
+            nodes.append({
+                "key": folder["name"],          # unique, e.g. "From the node 2"
+                "num": suffix,
+                "name": label,
+                "lat": info.get("lat"),
+                "lon": info.get("lon"),
+                "desc": folder["name"],
+                "folder_id": folder["id"],
+            })
+        def _order(n):
+            digits = re.sub(r"\D", "", n.get("num") or "")
+            return (0, int(digits)) if digits else (1, str(n["key"]).lower())
+        nodes.sort(key=_order)
+    else:
+        # No numbered sub-folders: the configured folder itself is one node.
+        info = _read_node_ini(root_id)
+        nodes.append({
+            "key": info.get("name") or "Node",
+            "num": "",
+            "name": info.get("name") or "Node",
+            "lat": info.get("lat"),
+            "lon": info.get("lon"),
+            "desc": "single node",
+            "folder_id": root_id,
+        })
+    return nodes
+
+
+# ============================================================================
 # SIDEBAR NAVIGATION
 # ============================================================================
 with st.sidebar:
@@ -1175,9 +1307,36 @@ with st.sidebar:
     )
 
     st.divider()
-    node = st.selectbox("Active node", NODE_KEYS, index=0, key="node_select_top")
-    if node != st.session_state.get("active_node"):
-        st.session_state["active_node"] = node
+    # ── Multi-node: discover every "From the node <N>" and pick the active one ─
+    _disc = discover_nodes(GDRIVE_ROOT_ID, cache_epoch=st.session_state.get("DRIVE_EPOCH", "0"))
+    if _disc:
+        _disc = [dict(n) for n in _disc]  # copy: never mutate the cached result
+        # Legacy single-node fallback: one node with no .ini coords -> borrow the
+        # hardcoded preset so the map isn't blank during migration.
+        if len(_disc) == 1 and _disc[0].get("lat") is None and NODES and NODES[0].get("lat") is not None:
+            _disc[0]["lat"]  = NODES[0]["lat"]
+            _disc[0]["lon"]  = NODES[0]["lon"]
+            _disc[0]["name"] = _disc[0].get("name") or NODES[0]["name"]
+        NODES = _disc
+        NODE_KEYS = [n["key"] for n in NODES]
+
+    _labels = {n["key"]: n.get("name", n["key"]) for n in NODES}
+    if st.session_state.get("node_select_top") not in NODE_KEYS:
+        st.session_state.pop("node_select_top", None)
+    node = st.selectbox(
+        "Active node", NODE_KEYS, key="node_select_top",
+        format_func=lambda kk: _labels.get(kk, kk),
+    )
+    st.session_state["active_node"] = node
+
+    # Point the WHOLE app at the selected node's Drive folder, then refresh the
+    # freshness token for that folder. All downstream reads use GDRIVE_FOLDER_ID.
+    _active_node = next((n for n in NODES if n["key"] == node), NODES[0] if NODES else None)
+    if _active_node and _active_node.get("folder_id"):
+        GDRIVE_FOLDER_ID = _active_node["folder_id"]
+    _ensure_epoch_key()
+    if len(NODE_KEYS) > 1:
+        st.caption(f"📡 {len(NODE_KEYS)} nodes")
 
     if st.button("↻ Refresh data", use_container_width=True, key=k("btn_refresh")):
         try:
@@ -1213,15 +1372,17 @@ with st.sidebar:
 # ============================================================================
 # Helper: load CSV index (shared by Detections + Search)
 # ============================================================================
-@st.cache_data(ttl=300, max_entries=5, show_spinner=False)
-def _load_csv_index(_epoch: str):
-    """Load and index all root CSVs. Returns (bn_paths, kn_paths, bn_by_date, kn_by_date)."""
+@st.cache_data(ttl=300, max_entries=20, show_spinner=False)
+def _load_csv_index(cache_epoch: str, folder_id: str):
+    """Load and index all root CSVs for ONE node's folder. Returns
+    (bn_paths, kn_paths, bn_by_date, kn_by_date). Keyed by (cache_epoch, folder_id)
+    so every node is cached separately — no cross-node crosstalk."""
     if drive_enabled():
-        bn_meta, kn_meta = list_csvs_drive_root(GDRIVE_FOLDER_ID, cache_epoch=_epoch, nocache="stable")
-        bn_paths = [str(ensure_csv_cached(m, subdir="root/bn", cache_epoch=_epoch, force=False)) for m in bn_meta]
-        kn_paths = [str(ensure_csv_cached(m, subdir="root/kn", cache_epoch=_epoch, force=False)) for m in kn_meta]
+        bn_meta, kn_meta = list_csvs_drive_root(folder_id, cache_epoch=cache_epoch, nocache="stable")
+        bn_paths = [str(ensure_csv_cached(m, subdir="root/bn", cache_epoch=cache_epoch, force=False)) for m in bn_meta]
+        kn_paths = [str(ensure_csv_cached(m, subdir="root/kn", cache_epoch=cache_epoch, force=False)) for m in kn_meta]
     else:
-        bn_local, kn_local = list_csvs_local(ROOT_LOCAL)
+        bn_local, kn_local = list_csvs_local(folder_id)
         bn_paths, kn_paths = list(bn_local), list(kn_local)
     bn_by_date = build_date_index(bn_paths, "bn") if bn_paths else {}
     kn_by_date = build_date_index(kn_paths, "kn") if kn_paths else {}
@@ -1235,8 +1396,13 @@ if page == "Nodes":
     st.markdown("#### Node locations")
 
     _df_nodes = pd.DataFrame(
-        [{"lat": n["lat"], "lon": n["lon"], "name": n["name"], "key": n["key"], "desc": n["desc"]} for n in NODES]
+        [{"lat": n.get("lat"), "lon": n.get("lon"), "name": n.get("name", n["key"]),
+          "key": n["key"], "desc": n.get("desc", "")} for n in NODES]
     )
+    # Only nodes with valid coordinates can be mapped.
+    _n_total = len(_df_nodes)
+    _df_nodes = _df_nodes.dropna(subset=["lat", "lon"]).reset_index(drop=True)
+    _n_missing = _n_total - len(_df_nodes)
     if "active_node" not in st.session_state:
         st.session_state["active_node"] = NODE_KEYS[0]
 
@@ -1244,7 +1410,12 @@ if page == "Nodes":
         _center = _df_nodes[_df_nodes["key"] == st.session_state["active_node"]][["lat", "lon"]].iloc[0].to_dict()
         center_lat, center_lon = float(_center["lat"]), float(_center["lon"])
     except Exception:
-        center_lat, center_lon = -36.9003, 174.8839
+        if not _df_nodes.empty:
+            center_lat, center_lon = float(_df_nodes["lat"].iloc[0]), float(_df_nodes["lon"].iloc[0])
+        else:
+            center_lat, center_lon = -36.9003, 174.8839
+    if _n_missing:
+        st.caption(f"⚠️ {_n_missing} node(s) have no lat/long in their .ini and are not shown on the map.")
 
     # Map + status side by side
     col_map, col_status = st.columns([3, 1])
@@ -1256,9 +1427,12 @@ if page == "Nodes":
             from streamlit_folium import st_folium
             m = folium.Map(location=[center_lat, center_lon], zoom_start=13, control_scale=True, tiles="CartoDB Positron")
             for _, r in _df_nodes.iterrows():
+                _act = (r["key"] == st.session_state.get("active_node"))
                 folium.CircleMarker(
-                    location=[float(r["lat"]), float(r["lon"])], radius=12,
-                    color="#2E7D32", fill=True, fill_color="#4CAF50", fill_opacity=0.8,
+                    location=[float(r["lat"]), float(r["lon"])], radius=14 if _act else 11,
+                    color="#FFB300" if _act else "#2E7D32", fill=True,
+                    fill_color="#FFC107" if _act else "#4CAF50",
+                    fill_opacity=0.95 if _act else 0.75,
                     tooltip=f"<b>{r['name']}</b><br>{r['desc']}",
                 ).add_to(m)
             st_folium(m, width=None, height=480, returned_objects=[])
@@ -1342,7 +1516,7 @@ elif page == "Detections":
     st.caption("Heatmap of detections by species and hour. Filters auto-apply.")
 
     epoch = st.session_state.get("DRIVE_EPOCH", "0")
-    bn_paths, kn_paths, bn_by_date, kn_by_date = _load_csv_index(epoch)
+    bn_paths, kn_paths, bn_by_date, kn_by_date = _load_csv_index(epoch, GDRIVE_FOLDER_ID)
 
     bn_dates = sorted(bn_by_date.keys())
     kn_dates = sorted(kn_by_date.keys())
@@ -1765,7 +1939,7 @@ elif page == "Search":
     st.caption("Search for species across a date range. See daily detection counts and peak activity hours.")
 
     epoch = st.session_state.get("DRIVE_EPOCH", "0")
-    bn_paths, kn_paths, bn_by_date, kn_by_date = _load_csv_index(epoch)
+    bn_paths, kn_paths, bn_by_date, kn_by_date = _load_csv_index(epoch, GDRIVE_FOLDER_ID)
     all_dates = sorted(set(bn_by_date.keys()) | set(kn_by_date.keys()))
 
     if not all_dates:
